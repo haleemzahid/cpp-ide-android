@@ -1,0 +1,17 @@
+.gradle/
+build/
+local.properties
+.idea/
+*.iml
+.cxx/
+captures/
+.externalNativeBuild/
+# Staged Termux toolchain artifacts (regenerate with stage_toolchain.py)
+core/src/main/jniLibs/*/libclang.so
+core/src/main/jniLibs/*/libld.so
+core/src/main/jniLibs/*/libclang-cpp.so
+core/src/main/jniLibs/*/libLLVM.so
+core/src/main/jniLibs/*/libc++_shared.so
+core/src/main/assets/termux.zip
+# jnibridge built by Gradle
+core/src/main/jniLibs/*/libjnibridge.so

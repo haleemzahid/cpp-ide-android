@@ -1,0 +1,15 @@
+{
+  "languages": [
+    {
+      "name": "cpp",
+      "scopeName": "source.cpp",
+      "grammar": "textmate/cpp/cpp.tmLanguage.json",
+      "languageConfiguration": "textmate/cpp/language-configuration.json"
+    },
+    {
+      "name": "c",
+      "scopeName": "source.c",
+      "grammar": "textmate/cpp/c.tmLanguage.json"
+    }
+  ]
+}

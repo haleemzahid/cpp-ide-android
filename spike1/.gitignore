@@ -1,0 +1,21 @@
+.gradle/
+build/
+local.properties
+.idea/
+*.iml
+.cxx/
+captures/
+.externalNativeBuild/
+# Spike 1 native artifacts (built by Gradle)
+app/src/main/jniLibs/*/libnativehello.so
+app/src/main/jniLibs/*/libhellolib.so
+app/src/main/jniLibs/*/libjnibridge.so
+app/src/main/jniLibs/*/libuser.so
+app/src/main/jniLibs/*/libdebug_target.so
+# Spike 2b staged Termux toolchain (huge — run stage_toolchain.py to regenerate)
+app/src/main/jniLibs/*/libclang.so
+app/src/main/jniLibs/*/libld.so
+app/src/main/jniLibs/*/libclang-cpp.so
+app/src/main/jniLibs/*/libLLVM.so
+app/src/main/jniLibs/*/libc++_shared.so
+app/src/main/assets/termux.zip
