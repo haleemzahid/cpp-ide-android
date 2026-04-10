@@ -1,10 +1,13 @@
 package dev.cppide.core
 
 import android.content.Context
+import dev.cppide.core.ai.DefaultModelRepository
+import dev.cppide.core.ai.ModelRepository
 import dev.cppide.core.build.BuildService
 import dev.cppide.core.build.ClangBuildService
 import dev.cppide.core.common.DefaultDispatchers
 import dev.cppide.core.common.DispatcherProvider
+import dev.cppide.core.debug.DebuggerSpike
 import dev.cppide.core.lsp.ClangdLspService
 import dev.cppide.core.lsp.LspService
 import dev.cppide.core.project.DefaultProjectService
@@ -39,6 +42,8 @@ class Core private constructor(
     val projectService: ProjectService,
     val sessionRepository: SessionRepository,
     val lspService: LspService,
+    val modelRepository: ModelRepository,
+    val debuggerSpike: DebuggerSpike,
 ) {
 
     /**
@@ -86,6 +91,8 @@ class Core private constructor(
                 projectService = DefaultProjectService(dispatchers),
                 sessionRepository = RoomSessionRepository(app, dispatchers),
                 lspService = ClangdLspService(toolchain, dispatchers),
+                modelRepository = DefaultModelRepository(app, dispatchers),
+                debuggerSpike = DebuggerSpike(toolchain, dispatchers),
             )
         }
     }

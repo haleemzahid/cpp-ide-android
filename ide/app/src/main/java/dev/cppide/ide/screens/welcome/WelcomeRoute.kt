@@ -3,8 +3,12 @@ package dev.cppide.ide.screens.welcome
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import dev.cppide.core.Core
+import dev.cppide.core.debug.DebuggerSpike
 import dev.cppide.core.session.RecentProject
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.stateIn
@@ -29,6 +33,9 @@ fun WelcomeRoute(
         .recentProjects()
         .collectAsState(initial = emptyList())
 
+    // Temporary spike state — lldb-server reachability test.
+    var spikeOutput by remember { mutableStateOf<String?>(null) }
+
     WelcomeScreen(
         recents = recents,
         onOpenProject = { project ->
@@ -45,5 +52,21 @@ fun WelcomeRoute(
         onCreateNew = onCreateNew,
         onOpenFolder = onOpenFolder,
         onSettings = onSettings,
+        onRunDebugSpike = {
+            spikeOutput = "Running…"
+            scope.launch {
+                // Toolchain must be installed before we can locate lldb-server;
+                // clangd spike uses the same prerequisite.
+                core.toolchain.install()
+                val result = core.debuggerSpike.run()
+                spikeOutput = when (result) {
+                    is DebuggerSpike.Result.Ok ->
+                        "OK\n\nbanner:\n${result.banner}\n\nstderr:\n${result.stderrTail}"
+                    is DebuggerSpike.Result.Failed ->
+                        "FAILED at [${result.stage}]\n${result.message}\n\nstderr:\n${result.stderrTail}"
+                }
+            }
+        },
+        debugSpikeOutput = spikeOutput,
     )
 }

@@ -243,6 +243,11 @@ def resolve_closure(initial_pkgs):
 
 
 def main():
+    # Compiler/linker closure only. `lldb-server` is staged separately in
+    # stage_toolchain.py — running it through this resolver drags in
+    # liblldb.so's full python/openssl/ncurses closure (200+ MB of stuff
+    # lldb-server itself doesn't touch). We just want lldb-server's direct
+    # DT_NEEDED (liblzma.so.5 is the only non-system lib it adds).
     initial = [
         "clang",           # driver + libclang-cpp.so
         "libllvm",         # libLLVM.so

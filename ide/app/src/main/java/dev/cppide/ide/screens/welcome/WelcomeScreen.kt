@@ -18,15 +18,21 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.BugReport
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.Icon
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import dev.cppide.core.session.RecentProject
 import dev.cppide.ide.components.CaptionText
 import dev.cppide.ide.components.CppButton
@@ -49,6 +55,8 @@ fun WelcomeScreen(
     onCreateNew: () -> Unit,
     onOpenFolder: () -> Unit,
     onSettings: () -> Unit,
+    onRunDebugSpike: () -> Unit,
+    debugSpikeOutput: String?,
     modifier: Modifier = Modifier,
 ) {
     val colors = CppIde.colors
@@ -120,6 +128,37 @@ fun WelcomeScreen(
                         style = CppButtonStyle.Secondary,
                         modifier = Modifier.weight(1f),
                     )
+                }
+            }
+
+            // ---- TEMPORARY: debugger spike trigger ----
+            // Throwaway UI to run the lldb-server reachability spike.
+            // Remove once we commit to a debugger design.
+            item { Spacer(Modifier.height(dimens.spacingM)) }
+            item { SectionText("Debug spike (temporary)") }
+            item {
+                CppButton(
+                    text = "Run lldb-server spike",
+                    onClick = onRunDebugSpike,
+                    style = CppButtonStyle.Secondary,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            if (debugSpikeOutput != null) {
+                item {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(colors.surfaceElevated)
+                            .padding(dimens.spacingM),
+                    ) {
+                        Text(
+                            text = debugSpikeOutput,
+                            color = colors.textPrimary,
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
                 }
             }
         }

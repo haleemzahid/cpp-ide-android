@@ -76,7 +76,14 @@ def stage_jnilibs():
     src = termux_path("clang", "bin", "clangd")
     copy(src, os.path.join(JNILIBS, "libclangd.so"))
 
-    # 4. Shared libraries with clean names (loaded by the dynamic linker at
+    # 4. lldb-server executable -> libLLDBServer.so (GDB-remote debug
+    # server for step debugging). NOT the full lldb CLI — that would drag
+    # in python/openssl/ncurses/etc. lldb-server itself only needs libz,
+    # liblzma.5, and the libLLVM/libclang-cpp/libc++ we already ship.
+    src = termux_path("lldb", "bin", "lldb-server")
+    copy(src, os.path.join(JNILIBS, "libLLDBServer.so"))
+
+    # 5. Shared libraries with clean names (loaded by the dynamic linker at
     # exec time — sonames are unversioned so AGP's lib*.so packager accepts).
     libs_from_pkgs = {
         "libclang-cpp.so": ("clang", "lib/libclang-cpp.so"),
@@ -110,6 +117,18 @@ def stage_assets_zip():
         path = info["path"]
         arcname = f"lib/{soname}"
         entries.append((path, arcname))
+
+    # 1b) lldb-server's extra dep not in the resolver closure. We don't
+    # put lldb in the resolver's initial set because doing so drags in
+    # liblldb.so → python3.13 → openssl → ncurses → ... (200 MB of stuff
+    # lldb-server itself doesn't touch). Instead, we stage lldb-server
+    # manually and add only its one extra DT_NEEDED entry here.
+    lzma_path = termux_path("liblzma", "lib", "liblzma.so.5.8.3")
+    if os.path.exists(lzma_path):
+        entries.append((lzma_path, "lib/liblzma.so.5"))
+    else:
+        print(f"  [WARN] liblzma.so.5 not found at {lzma_path} — "
+              "lldb-server will fail to load")
 
     # 2) ndk-sysroot (Android headers + crt files + small native libs)
     # Must preserve the "usr/" prefix — clang's Android driver finds per-triple

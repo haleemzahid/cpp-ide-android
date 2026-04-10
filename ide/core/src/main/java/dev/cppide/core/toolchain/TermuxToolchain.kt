@@ -144,6 +144,7 @@ class TermuxToolchain(
         val clangTarget = File(nativeLibDir, "libclang.so").absolutePath
         val ldTarget = File(nativeLibDir, "libld.so").absolutePath
         val clangdTarget = File(nativeLibDir, "libclangd.so").absolutePath
+        val lldbServerTarget = File(nativeLibDir, "libLLDBServer.so").absolutePath
 
         var created = 0
         fun linkIfStale(target: String, name: String) {
@@ -161,6 +162,7 @@ class TermuxToolchain(
         CLANG_ALIASES.forEach { linkIfStale(clangTarget, it) }
         LD_ALIASES.forEach { linkIfStale(ldTarget, it) }
         linkIfStale(clangdTarget, "clangd")
+        linkIfStale(lldbServerTarget, "lldb-server")
         return created
     }
 
@@ -169,6 +171,7 @@ class TermuxToolchain(
         clangxx = File(binDir, "clang++"),
         ld = File(binDir, "ld"),
         clangd = File(binDir, "clangd"),
+        lldbServer = File(binDir, "lldb-server"),
         sysroot = sysroot,
         resourceDir = resourceDir,
         nativeLibDir = nativeLibDir,
@@ -185,7 +188,8 @@ class TermuxToolchain(
         private const val TERMUX_ZIP = "termux.zip"
 
         // Bumped when the termux.zip schema changes so old extractions wipe automatically.
-        private const val MARKER_VERSION = 2
+        // v3: added liblzma.so.5 for lldb-server.
+        private const val MARKER_VERSION = 3
         private const val CLANG_RESOURCE_VERSION = "21"
 
         private val CLANG_ALIASES = listOf(
