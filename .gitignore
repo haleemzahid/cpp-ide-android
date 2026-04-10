@@ -28,6 +28,7 @@ termux-pkgs/libuser_compiled.so
 
 # ---- Staged Termux toolchain artifacts (run stage_toolchain.py to regenerate)
 **/jniLibs/*/libclang.so
+**/jniLibs/*/libclangd.so
 **/jniLibs/*/libld.so
 **/jniLibs/*/libclang-cpp.so
 **/jniLibs/*/libLLVM.so

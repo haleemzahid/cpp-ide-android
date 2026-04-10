@@ -14,6 +14,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import dev.cppide.core.lsp.LspCompletion
 import dev.cppide.ide.screens.editor.components.BottomPanel
 import dev.cppide.ide.screens.editor.components.EditorPane
 import dev.cppide.ide.screens.editor.components.EditorTopBar
@@ -46,6 +47,7 @@ fun EditorScreen(
     state: EditorState,
     onIntent: (EditorIntent) -> Unit,
     onBack: () -> Unit,
+    onRequestCompletion: suspend (liveContent: String, line: Int, column: Int) -> List<LspCompletion>,
     modifier: Modifier = Modifier,
 ) {
     val colors = CppIde.colors
@@ -84,8 +86,12 @@ fun EditorScreen(
                     EmptyEditorPane(modifier = Modifier.fillMaxSize())
                 } else {
                     EditorPane(
-                        content = openFile.content,
+                        // Stable per-file id so the editor recreates only when
+                        // the user opens a different file, not on every keystroke.
+                        fileId = openFile.relativePath,
+                        initialContent = openFile.savedContent,
                         onContentChange = { onIntent(EditorIntent.EditContent(it)) },
+                        onRequestCompletion = onRequestCompletion,
                         modifier = Modifier.fillMaxSize(),
                     )
                 }
@@ -95,7 +101,7 @@ fun EditorScreen(
                 BottomPanel(
                     activeTab = state.bottomPanelTab,
                     terminalLines = state.terminalLines,
-                    problems = state.problems,
+                    problems = state.allProblems,
                     onSelectTab = { onIntent(EditorIntent.SwitchBottomTab(it)) },
                     onClose = { onIntent(EditorIntent.ToggleBottomPanel) },
                     onClearTerminal = { onIntent(EditorIntent.ClearTerminal) },

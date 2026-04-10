@@ -17,6 +17,9 @@ data class ToolchainPaths(
     /** Symlink: filesDir/termux/bin/ld → nativeLibraryDir/libld.so (lld multicall) */
     val ld: File,
 
+    /** Symlink: filesDir/termux/bin/clangd → nativeLibraryDir/libclangd.so (LSP server) */
+    val clangd: File,
+
     /** filesDir/termux/sysroot — clang passes this via --sysroot= */
     val sysroot: File,
 

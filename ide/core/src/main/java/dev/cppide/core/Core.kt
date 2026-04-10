@@ -5,6 +5,8 @@ import dev.cppide.core.build.BuildService
 import dev.cppide.core.build.ClangBuildService
 import dev.cppide.core.common.DefaultDispatchers
 import dev.cppide.core.common.DispatcherProvider
+import dev.cppide.core.lsp.ClangdLspService
+import dev.cppide.core.lsp.LspService
 import dev.cppide.core.project.DefaultProjectService
 import dev.cppide.core.project.ProjectService
 import dev.cppide.core.run.DefaultRunService
@@ -36,6 +38,7 @@ class Core private constructor(
     val runService: RunService,
     val projectService: ProjectService,
     val sessionRepository: SessionRepository,
+    val lspService: LspService,
 ) {
 
     /**
@@ -82,6 +85,7 @@ class Core private constructor(
                 runService = DefaultRunService(dispatchers),
                 projectService = DefaultProjectService(dispatchers),
                 sessionRepository = RoomSessionRepository(app, dispatchers),
+                lspService = ClangdLspService(toolchain, dispatchers),
             )
         }
     }

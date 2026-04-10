@@ -72,7 +72,11 @@ def stage_jnilibs():
     src = termux_path("lld", "bin", "lld")
     copy(src, os.path.join(JNILIBS, "libld.so"))
 
-    # 3. Shared libraries with clean names (loaded by the dynamic linker at
+    # 3. clangd executable -> libclangd.so (LSP server for IntelliSense)
+    src = termux_path("clang", "bin", "clangd")
+    copy(src, os.path.join(JNILIBS, "libclangd.so"))
+
+    # 4. Shared libraries with clean names (loaded by the dynamic linker at
     # exec time — sonames are unversioned so AGP's lib*.so packager accepts).
     libs_from_pkgs = {
         "libclang-cpp.so": ("clang", "lib/libclang-cpp.so"),

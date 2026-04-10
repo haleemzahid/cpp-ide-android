@@ -143,6 +143,7 @@ class TermuxToolchain(
         binDir.mkdirs()
         val clangTarget = File(nativeLibDir, "libclang.so").absolutePath
         val ldTarget = File(nativeLibDir, "libld.so").absolutePath
+        val clangdTarget = File(nativeLibDir, "libclangd.so").absolutePath
 
         var created = 0
         fun linkIfStale(target: String, name: String) {
@@ -159,6 +160,7 @@ class TermuxToolchain(
         }
         CLANG_ALIASES.forEach { linkIfStale(clangTarget, it) }
         LD_ALIASES.forEach { linkIfStale(ldTarget, it) }
+        linkIfStale(clangdTarget, "clangd")
         return created
     }
 
@@ -166,6 +168,7 @@ class TermuxToolchain(
         clang = File(binDir, "clang"),
         clangxx = File(binDir, "clang++"),
         ld = File(binDir, "ld"),
+        clangd = File(binDir, "clangd"),
         sysroot = sysroot,
         resourceDir = resourceDir,
         nativeLibDir = nativeLibDir,

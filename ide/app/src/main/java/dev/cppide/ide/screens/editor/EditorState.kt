@@ -1,6 +1,8 @@
 package dev.cppide.ide.screens.editor
 
 import dev.cppide.core.build.Diagnostic
+import dev.cppide.core.lsp.LspDiagnostic
+import dev.cppide.core.lsp.LspState
 import dev.cppide.core.project.Project
 import dev.cppide.core.project.ProjectNode
 
@@ -24,10 +26,36 @@ data class EditorState(
     val bottomPanelTab: BottomPanelTab = BottomPanelTab.Terminal,
     val terminalLines: List<TerminalLine> = emptyList(),
     val problems: List<Diagnostic> = emptyList(),
+
+    // ---- LSP / IntelliSense ----
+    val lspState: LspState = LspState.NotStarted,
+    val lspDiagnosticsByFile: Map<String, List<LspDiagnostic>> = emptyMap(),
 ) {
-    val errorCount: Int get() = problems.count { it.isError }
-    val warningCount: Int get() = problems.count { it.severity == Diagnostic.Severity.WARNING }
+    val errorCount: Int get() = allProblems.count { it.isError }
+    val warningCount: Int get() = allProblems.count { it.severity == Diagnostic.Severity.WARNING }
     val isBusy: Boolean get() = runState != RunState.Idle
+
+    /** LSP diagnostics for the currently open file, or empty if none. */
+    val lspDiagnostics: List<LspDiagnostic>
+        get() {
+            // Match the key format used by ClangdLspService.publishDiagnostics:
+            // absolute filesystem path, NOT a file:// URI string. URI
+            // normalisation differs between Java versions ("file:/" vs
+            // "file:///") so paths are the safer common ground.
+            val absPath = openFile?.let {
+                java.io.File(project.root, it.relativePath).absolutePath
+            } ?: return emptyList()
+            return lspDiagnosticsByFile[absPath] ?: emptyList()
+        }
+
+    /**
+     * Unified problem list shown in the Problems panel — last build's
+     * structured diagnostics PLUS clangd's live diagnostics for the
+     * currently open file. Build diagnostics come first so the user
+     * sees the build state alongside semantic editor errors.
+     */
+    val allProblems: List<Diagnostic>
+        get() = problems + lspDiagnostics.map { it.toBuildDiagnostic() }
 }
 
 /**

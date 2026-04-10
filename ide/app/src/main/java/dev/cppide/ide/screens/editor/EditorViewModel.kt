@@ -1,15 +1,18 @@
 package dev.cppide.ide.screens.editor
 
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.cppide.core.Core
 import dev.cppide.core.build.BuildConfig
 import dev.cppide.core.build.BuildResult
 import dev.cppide.core.build.Diagnostic
+import dev.cppide.core.lsp.LspCompletion
 import dev.cppide.core.project.Project
 import dev.cppide.core.run.RunConfig
 import dev.cppide.core.run.RunEvent
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -18,6 +21,7 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.io.File
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Holds [EditorState] and processes [EditorIntent]s. Owns the long-running
@@ -40,6 +44,12 @@ class EditorViewModel(
     /** Debounced auto-save job. Reset on every keystroke. */
     private var autoSaveJob: Job? = null
 
+    /** Debounced LSP didChange job. Sent ~200ms after the last keystroke. */
+    private var lspChangeJob: Job? = null
+
+    /** Monotonic LSP document version, increments on every didChange. */
+    private val lspVersion = AtomicInteger(1)
+
     init {
         viewModelScope.launch {
             core.projectService.open(project.root, project.name)
@@ -50,6 +60,53 @@ class EditorViewModel(
                     if (mainCpp != null) handle(EditorIntent.OpenFile(mainCpp.relativePath))
                 }
                 .onFailure { t -> _state.update { it.copy(errorMessage = t.message) } }
+        }
+
+        // Mirror clangd state + diagnostics into our screen state.
+        viewModelScope.launch {
+            core.lspService.state.collect { lsp ->
+                val previous = _state.value.lspState
+                _state.update { it.copy(lspState = lsp) }
+                // Replay didOpen for the active file when clangd transitions
+                // to Ready. The init block opens the file in parallel with
+                // starting clangd, so the first didOpen often arrives while
+                // server == null and is silently dropped. Resending here
+                // ensures clangd has the document state and starts producing
+                // diagnostics + completions for it.
+                if (lsp is dev.cppide.core.lsp.LspState.Ready &&
+                    previous !is dev.cppide.core.lsp.LspState.Ready) {
+                    _state.value.openFile?.let { f ->
+                        val file = core.projectService.resolve(f.relativePath)
+                        val lang = if (file.extension.lowercase() == "c") "c" else "cpp"
+                        core.lspService.didOpen(file, lang, f.content)
+                    }
+                }
+            }
+        }
+        viewModelScope.launch {
+            core.lspService.diagnostics.collect { byFile ->
+                _state.update { it.copy(lspDiagnosticsByFile = byFile) }
+            }
+        }
+
+        // Start clangd asynchronously. The toolchain may need to install
+        // first; that's a one-time ~30s operation. The editor stays
+        // usable in the meantime — completions/diagnostics just arrive
+        // later when LSP transitions to Ready.
+        viewModelScope.launch {
+            ensureLspStarted(project)
+        }
+    }
+
+    private suspend fun ensureLspStarted(project: Project) {
+        // Always call install() — it's idempotent and ensures bin/ symlinks
+        // are valid. We can't trust isReady() alone: a previous install
+        // might have run before we added new aliases (e.g. the clangd
+        // symlink), so the marker says "ready" but the new symlink is
+        // missing. install() re-validates every time.
+        val r = core.toolchain.install()
+        if (r.isSuccess) {
+            core.lspService.start(project)
         }
     }
 
@@ -64,6 +121,7 @@ class EditorViewModel(
                     s.copy(openFile = s.openFile?.copy(content = intent.newContent))
                 }
                 scheduleAutoSave()
+                scheduleLspDidChange(intent.newContent)
             }
             EditorIntent.Save -> viewModelScope.launch { save() }
 
@@ -91,8 +149,27 @@ class EditorViewModel(
                             drawerOpen = false,
                         )
                     }
+                    // Tell clangd we opened the file. Language id by extension.
+                    val file = core.projectService.resolve(relativePath)
+                    val lang = if (file.extension.lowercase() == "c") "c" else "cpp"
+                    core.lspService.didOpen(file, lang, content)
                 }
                 .onFailure { t -> _state.update { it.copy(errorMessage = "open: ${t.message}") } }
+        }
+    }
+
+    /**
+     * Debounced LSP didChange. Each keystroke schedules a notification
+     * a short time in the future; the next keystroke cancels the pending
+     * one so clangd doesn't get hammered while the user is typing fast.
+     */
+    private fun scheduleLspDidChange(newContent: String) {
+        val openFile = _state.value.openFile ?: return
+        lspChangeJob?.cancel()
+        lspChangeJob = viewModelScope.launch {
+            delay(LSP_CHANGE_DEBOUNCE_MS)
+            val file = core.projectService.resolve(openFile.relativePath)
+            core.lspService.didChange(file, newContent, lspVersion.incrementAndGet())
         }
     }
 
@@ -124,6 +201,8 @@ class EditorViewModel(
                             fileTree = core.projectService.fileTree.value,
                         )
                     }
+                    val file = core.projectService.resolve(openFile.relativePath)
+                    core.lspService.didSave(file)
                     true
                 },
                 onFailure = { t ->
@@ -242,6 +321,43 @@ class EditorViewModel(
         _state.update { it.copy(runState = RunState.Idle) }
     }
 
+    /**
+     * Fetch clangd completions for the open file at [line]/[column]
+     * (both 0-indexed). Called by the editor's completion worker thread
+     * via a `runBlocking` bridge in [LspCppLanguage], so this runs off
+     * the main thread.
+     *
+     * [liveContent] is the editor's live text pulled straight from
+     * sora's [io.github.rosemoe.sora.text.Content] — NOT our Compose
+     * state copy. The ContentChangeEvent → state update chain has
+     * latency, so `_state.value.openFile.content` may lag by a keystroke
+     * or two; using the live text guarantees clangd sees exactly what
+     * the user sees.
+     *
+     * We also cancel any pending debounced didChange and send a fresh
+     * one synchronously, otherwise clangd answers on a stale buffer.
+     */
+    suspend fun requestCompletion(
+        liveContent: String,
+        line: Int,
+        column: Int,
+    ): List<LspCompletion> {
+        val openFile = _state.value.openFile ?: return emptyList()
+        val file = core.projectService.resolve(openFile.relativePath)
+        lspChangeJob?.cancelAndJoin()
+        lspChangeJob = null
+        val version = lspVersion.incrementAndGet()
+        Log.d(
+            TAG,
+            "requestCompletion flush didChange v=$version len=${liveContent.length} " +
+                "pos=$line:$column file=${file.name}"
+        )
+        core.lspService.didChange(file, liveContent, version)
+        val items = core.lspService.complete(file, line, column)
+        Log.d(TAG, "requestCompletion got ${items.size} items")
+        return items
+    }
+
     // ---- diagnostic helpers ----
 
     private fun jumpTo(diagnostic: Diagnostic) {
@@ -267,8 +383,18 @@ class EditorViewModel(
         it.copy(terminalLines = it.terminalLines + TerminalLine.Error(text))
     }
 
+    override fun onCleared() {
+        super.onCleared()
+        // Stop clangd when the screen is destroyed; releases ~200MB of
+        // process RAM and lets a fresh project start cleanly.
+        viewModelScope.launch { core.lspService.stop() }
+    }
+
     companion object {
+        private const val TAG = "cppide-editor"
         /** How long after the last keystroke to auto-save. */
         private const val AUTO_SAVE_DELAY_MS = 1_000L
+        /** How long after the last keystroke to push didChange to clangd. */
+        private const val LSP_CHANGE_DEBOUNCE_MS = 200L
     }
 }

@@ -28,5 +28,6 @@ fun EditorRoute(
         state = state,
         onIntent = viewModel::handle,
         onBack = onBack,
+        onRequestCompletion = viewModel::requestCompletion,
     )
 }

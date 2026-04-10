@@ -50,10 +50,15 @@ kotlin {
 
 dependencies {
     api(libs.kotlinx.coroutines.android)
+    implementation(libs.kotlinx.coroutines.jdk8)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx)
     ksp(libs.androidx.room.compiler)
+
+    // LSP client for clangd
+    api(libs.lsp4j)
+    api(libs.lsp4j.jsonrpc)
 }
 
 // --------------------------------------------------------------------------
