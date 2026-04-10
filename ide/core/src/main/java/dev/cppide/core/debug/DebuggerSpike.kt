@@ -46,7 +46,7 @@ class DebuggerSpike(
     private val dispatchers: DispatcherProvider,
 ) {
 
-    /** Result envelope. `Ok.banner` is the raw string clangd sent back. */
+    /** Result envelope. `Ok.banner` is the raw string lldb-server sent back. */
     sealed class Result {
         data class Ok(val banner: String, val stderrTail: String) : Result()
         data class Failed(
@@ -56,8 +56,13 @@ class DebuggerSpike(
         ) : Result()
     }
 
-    suspend fun run(): Result = withContext(dispatchers.io) {
-        Log.i(TAG, "run(): starting")
+    /**
+     * Platform-mode reachability probe. Launches lldb-server in `platform`
+     * mode (no target), confirms TCP + qSupported round-trip. This proves
+     * the transport works but does NOT exercise ptrace.
+     */
+    suspend fun runPlatform(): Result = withContext(dispatchers.io) {
+        Log.i(TAG, "runPlatform(): starting")
         val paths = toolchain.paths
             ?: return@withContext Result.Failed(
                 stage = "toolchain",
@@ -199,6 +204,252 @@ class DebuggerSpike(
                 proc.destroyForcibly()
             } catch (_: Throwable) {}
         }
+    }
+
+    /**
+     * Gdbserver-mode probe. Launches lldb-server in `gdbserver` mode with
+     * libdebug_target.so (a canned PIE arm64 binary shipped in jniLibs)
+     * as the target — lldb-server will fork, exec, PTRACE_TRACEME the
+     * child, and stop at entry. We then drive a short GDB-remote session:
+     *
+     *   ->  $qSupported#37       (capabilities handshake)
+     *   <-  $PacketSize=...#cc
+     *   ->  $?#3f                (query initial stop reason)
+     *   <-  $T05...#cc           (T packet: thread stopped, signal 05 = SIGTRAP)
+     *   ->  $g#67                (read all general-purpose regs)
+     *   <-  $<lots of hex>#cc    (~600 hex chars for arm64 GPRs)
+     *   ->  $k#6b                (kill + disconnect)
+     *
+     * Success = all three replies parse. That validates:
+     *  1. ptrace works from lldb-server inside untrusted_app_35
+     *  2. GDB-remote protocol round-trips over localhost TCP
+     *  3. Register read returns non-trivial data
+     * Everything after that — breakpoints, stepping, attach-to-dlopened
+     * user .so — is the real debugger work, not the spike.
+     */
+    suspend fun runGdbserver(): Result = withContext(dispatchers.io) {
+        Log.i(TAG, "runGdbserver(): starting")
+        val paths = toolchain.paths
+            ?: return@withContext Result.Failed(
+                stage = "toolchain",
+                message = "toolchain not installed",
+                stderrTail = "",
+            )
+
+        val lldbServer = paths.lldbServer
+        if (!lldbServer.exists()) {
+            return@withContext Result.Failed(
+                stage = "resolve",
+                message = "lldb-server symlink not found at ${lldbServer.absolutePath}",
+                stderrTail = "",
+            )
+        }
+
+        val target = File(paths.nativeLibDir, "libdebug_target.so")
+        if (!target.exists()) {
+            return@withContext Result.Failed(
+                stage = "resolve",
+                message = "libdebug_target.so not found at ${target.absolutePath}",
+                stderrTail = "",
+            )
+        }
+        Log.i(TAG, "target: ${target.absolutePath}")
+
+        val port = 5040
+        val cmd = listOf(
+            lldbServer.absolutePath,
+            "gdbserver",
+            "127.0.0.1:$port",
+            "--",
+            target.absolutePath,
+        )
+        Log.i(TAG, "spawn: $cmd")
+        val workingDir = paths.termuxRoot
+        val pb = ProcessBuilder(cmd)
+            .directory(workingDir)
+            .redirectErrorStream(false)
+        pb.environment().putAll(paths.processEnv(workingDir = workingDir))
+
+        val proc = try {
+            pb.start()
+        } catch (t: Throwable) {
+            Log.e(TAG, "spawn failed", t)
+            return@withContext Result.Failed(
+                stage = "spawn",
+                message = "${t.javaClass.simpleName}: ${t.message}",
+                stderrTail = "",
+            )
+        }
+        Log.i(TAG, "spawned, alive=${proc.isAlive}")
+
+        val sideScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val stderrBuf = StringBuilder()
+        sideScope.launch {
+            try {
+                proc.errorStream.bufferedReader().useLines { lines ->
+                    lines.forEach {
+                        Log.w(TAG, "[lldb-server] $it")
+                        synchronized(stderrBuf) {
+                            stderrBuf.append(it).append('\n')
+                            if (stderrBuf.length > 4000) {
+                                stderrBuf.delete(0, stderrBuf.length - 4000)
+                            }
+                        }
+                    }
+                }
+            } catch (_: Throwable) {}
+        }
+        fun stderrTail(): String = synchronized(stderrBuf) { stderrBuf.toString() }
+
+        try {
+            val socket = connectWithRetry("127.0.0.1", port, timeoutMs = 5000)
+                ?: return@withContext Result.Failed(
+                    stage = "connect",
+                    message = "could not connect to 127.0.0.1:$port after 5s " +
+                        "(lldb-server alive=${proc.isAlive})",
+                    stderrTail = stderrTail(),
+                )
+            Log.i(TAG, "connected tcp://127.0.0.1:$port")
+
+            socket.use { sock ->
+                sock.soTimeout = 3000
+                val out = sock.getOutputStream()
+                val input = sock.getInputStream()
+                val report = StringBuilder()
+
+                // Step 1: qSupported
+                val qSup = exchange(out, input, "qSupported") ?: return@withContext Result.Failed(
+                    stage = "qSupported",
+                    message = "no reply",
+                    stderrTail = stderrTail(),
+                )
+                Log.i(TAG, "qSupported <- $qSup")
+                report.appendLine("qSupported: $qSup")
+                if (!qSup.contains("PacketSize=")) {
+                    return@withContext Result.Failed(
+                        stage = "qSupported",
+                        message = "missing PacketSize in reply: $qSup",
+                        stderrTail = stderrTail(),
+                    )
+                }
+
+                // Step 2: ? — query initial stop. lldb-server stops the
+                // target at the first instruction after exec, so we should
+                // see T<sig> thread status.
+                val stopReply = exchange(out, input, "?") ?: return@withContext Result.Failed(
+                    stage = "stopReason",
+                    message = "no reply to ?",
+                    stderrTail = stderrTail(),
+                )
+                Log.i(TAG, "? <- $stopReply")
+                report.appendLine("?        : $stopReply")
+                if (!(stopReply.startsWith("T") || stopReply.startsWith("S"))) {
+                    return@withContext Result.Failed(
+                        stage = "stopReason",
+                        message = "unexpected stop reply: $stopReply",
+                        stderrTail = stderrTail(),
+                    )
+                }
+
+                // Step 3: read all GPRs. arm64 = 31 x 64-bit regs + SP + PC
+                // + PSTATE ≈ 272 bytes = ~544 hex chars. Not empty.
+                val gReply = exchange(out, input, "g") ?: return@withContext Result.Failed(
+                    stage = "readRegs",
+                    message = "no reply to g",
+                    stderrTail = stderrTail(),
+                )
+                Log.i(TAG, "g <- ${gReply.take(80)}…(${gReply.length} chars)")
+                report.appendLine("g        : ${gReply.length} chars, head=${gReply.take(32)}…")
+                if (gReply.length < 64 || !gReply.matches(Regex("^[0-9a-fA-F]+$"))) {
+                    return@withContext Result.Failed(
+                        stage = "readRegs",
+                        message = "invalid register payload (len=${gReply.length})",
+                        stderrTail = stderrTail(),
+                    )
+                }
+
+                // Step 4: polite disconnect. `k` kills the inferior and
+                // closes the session.
+                try {
+                    out.write("\$k#6b".toByteArray(Charsets.US_ASCII))
+                    out.flush()
+                } catch (_: Throwable) {}
+
+                return@withContext Result.Ok(
+                    banner = report.toString(),
+                    stderrTail = stderrTail(),
+                )
+            }
+        } finally {
+            try { proc.destroyForcibly() } catch (_: Throwable) {}
+        }
+    }
+
+    /**
+     * Send a GDB-remote packet body, read and parse one reply packet,
+     * acknowledge it with `+`, and return the body (between `$` and `#`).
+     * Returns null on timeout or stream close.
+     *
+     * GDB-remote protocol in default (acked) mode:
+     *   client -> $body#cc
+     *   server -> +                  (ack of client packet)
+     *   server -> $reply#cc
+     *   client -> +                  (ack of server reply)  <-- WE NEED THIS
+     *
+     * Without our trailing `+`, lldb-server waits on the ack, times out,
+     * and closes the session after the first exchange. `QStartNoAckMode`
+     * turns acks off entirely, but we don't negotiate it yet.
+     *
+     * This is NOT a real RSP implementation — no RLE decoding, no escape
+     * handling, no binary data, no retransmit on `-`. Good enough for
+     * spike-level qSupported / ? / g packets.
+     */
+    private fun exchange(
+        out: java.io.OutputStream,
+        input: java.io.InputStream,
+        body: String,
+    ): String? {
+        val cc = body.sumOf { it.code } and 0xff
+        val pkt = "\$$body#${"%02x".format(cc)}"
+        Log.d(TAG, "-> $pkt")
+        try {
+            out.write(pkt.toByteArray(Charsets.US_ASCII))
+            out.flush()
+        } catch (t: Throwable) {
+            Log.w(TAG, "exchange write failed: ${t.javaClass.simpleName}: ${t.message}")
+            return null
+        }
+        val sb = StringBuilder()
+        val buf = ByteArray(4096)
+        val deadline = System.currentTimeMillis() + 3000
+        while (System.currentTimeMillis() < deadline) {
+            val n = try {
+                input.read(buf)
+            } catch (t: Throwable) {
+                Log.w(TAG, "exchange read failed: ${t.javaClass.simpleName}: ${t.message}")
+                return null
+            }
+            if (n <= 0) {
+                Log.w(TAG, "exchange read: EOF (sb so far='${sb.take(60)}')")
+                return null
+            }
+            sb.append(String(buf, 0, n, Charsets.US_ASCII))
+            val dollar = sb.indexOf('$')
+            if (dollar < 0) continue
+            val hash = sb.indexOf('#', startIndex = dollar)
+            if (hash >= 0 && hash + 2 < sb.length) {
+                // Send our ack for the server's reply — required by the
+                // default RSP mode. Without this lldb-server will abandon
+                // the session after the first exchange.
+                try {
+                    out.write('+'.code)
+                    out.flush()
+                } catch (_: Throwable) { /* best-effort */ }
+                return sb.substring(dollar + 1, hash)
+            }
+        }
+        Log.w(TAG, "exchange: timeout waiting for reply to $body")
+        return null
     }
 
     /** Poll `connect(2)` until success or timeout — lldb-server doesn't

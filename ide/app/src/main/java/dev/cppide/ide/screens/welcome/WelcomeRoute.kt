@@ -1,5 +1,6 @@
 package dev.cppide.ide.screens.welcome
 
+import android.util.Log
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -53,20 +54,42 @@ fun WelcomeRoute(
         onOpenFolder = onOpenFolder,
         onSettings = onSettings,
         onRunDebugSpike = {
-            spikeOutput = "Running…"
+            spikeOutput = "Running platform probe…"
             scope.launch {
-                // Toolchain must be installed before we can locate lldb-server;
-                // clangd spike uses the same prerequisite.
                 core.toolchain.install()
-                val result = core.debuggerSpike.run()
-                spikeOutput = when (result) {
-                    is DebuggerSpike.Result.Ok ->
-                        "OK\n\nbanner:\n${result.banner}\n\nstderr:\n${result.stderrTail}"
-                    is DebuggerSpike.Result.Failed ->
-                        "FAILED at [${result.stage}]\n${result.message}\n\nstderr:\n${result.stderrTail}"
-                }
+                val result = core.debuggerSpike.runPlatform()
+                spikeOutput = formatSpikeResult("platform", result)
+            }
+        },
+        onRunGdbserverSpike = {
+            spikeOutput = "Running gdbserver probe…"
+            scope.launch {
+                core.toolchain.install()
+                val result = core.debuggerSpike.runGdbserver()
+                spikeOutput = formatSpikeResult("gdbserver", result)
             }
         },
         debugSpikeOutput = spikeOutput,
     )
+}
+
+private fun formatSpikeResult(label: String, result: DebuggerSpike.Result): String {
+    // Also log the envelope so we can see failures in logcat, not just
+    // the UI card. The card may be scrolled off-screen mid-run.
+    when (result) {
+        is DebuggerSpike.Result.Ok -> Log.i(
+            "cppide-dbgspike",
+            "$label RESULT Ok banner=${result.banner.replace('\n', '|')}"
+        )
+        is DebuggerSpike.Result.Failed -> Log.w(
+            "cppide-dbgspike",
+            "$label RESULT Failed stage=${result.stage} msg=${result.message}"
+        )
+    }
+    return when (result) {
+        is DebuggerSpike.Result.Ok ->
+            "$label: OK\n\n${result.banner}\n--stderr--\n${result.stderrTail}"
+        is DebuggerSpike.Result.Failed ->
+            "$label: FAILED [${result.stage}]\n${result.message}\n\n--stderr--\n${result.stderrTail}"
+    }
 }

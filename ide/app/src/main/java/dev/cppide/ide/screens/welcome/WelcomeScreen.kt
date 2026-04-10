@@ -56,6 +56,7 @@ fun WelcomeScreen(
     onOpenFolder: () -> Unit,
     onSettings: () -> Unit,
     onRunDebugSpike: () -> Unit,
+    onRunGdbserverSpike: () -> Unit,
     debugSpikeOutput: String?,
     modifier: Modifier = Modifier,
 ) {
@@ -137,12 +138,23 @@ fun WelcomeScreen(
             item { Spacer(Modifier.height(dimens.spacingM)) }
             item { SectionText("Debug spike (temporary)") }
             item {
-                CppButton(
-                    text = "Run lldb-server spike",
-                    onClick = onRunDebugSpike,
-                    style = CppButtonStyle.Secondary,
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(dimens.spacingM),
                     modifier = Modifier.fillMaxWidth(),
-                )
+                ) {
+                    CppButton(
+                        text = "Platform probe",
+                        onClick = onRunDebugSpike,
+                        style = CppButtonStyle.Secondary,
+                        modifier = Modifier.weight(1f),
+                    )
+                    CppButton(
+                        text = "Gdbserver probe",
+                        onClick = onRunGdbserverSpike,
+                        style = CppButtonStyle.Secondary,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
             }
             if (debugSpikeOutput != null) {
                 item {
