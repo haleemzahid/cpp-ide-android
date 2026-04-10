@@ -57,6 +57,12 @@ fun BottomPanelTabs(
             active = activeTab == BottomPanelTab.Problems,
             onClick = { onSelectTab(BottomPanelTab.Problems) },
         )
+        Spacer(Modifier.width(dimens.spacingS))
+        TabButton(
+            label = "Debug",
+            active = activeTab == BottomPanelTab.Debug,
+            onClick = { onSelectTab(BottomPanelTab.Debug) },
+        )
         Spacer(Modifier.weight(1f))
         if (activeTab == BottomPanelTab.Terminal) {
             CppIconButton(

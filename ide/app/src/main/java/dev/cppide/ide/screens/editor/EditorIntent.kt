@@ -22,6 +22,13 @@ sealed interface EditorIntent {
     data class JumpToDiagnostic(val diagnostic: Diagnostic) : EditorIntent
     data object ClearTerminal : EditorIntent
 
+    // debug
+    data object StartDebug : EditorIntent
+    data object DebugStep : EditorIntent
+    data object DebugContinue : EditorIntent
+    data object DebugPause : EditorIntent
+    data object DebugStop : EditorIntent
+
     // misc
     data object DismissError : EditorIntent
 }

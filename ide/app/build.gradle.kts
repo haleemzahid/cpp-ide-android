@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     // Kotlin support is provided automatically by AGP 9.0+. The compose
     // compiler plugin must still be applied separately.
@@ -73,4 +75,68 @@ dependencies {
     implementation(libs.sora.language.textmate)
 
     debugImplementation(libs.androidx.ui.tooling)
+}
+
+// --------------------------------------------------------------------------
+// Trampoline binary for the debugger. A tiny PIE arm64 executable that
+// dlopens the user's libuser.so and calls run_user_main. Compiled via
+// NDK clang (the project already uses NDK 27 for ndkVersion) and dropped
+// into jniLibs/arm64-v8a/libTrampoline.so so AGP treats it as a native
+// library (the "lib*.so trick" — lets it be exec'd from nativeLibraryDir
+// under Android 15's SELinux). Pattern copied from spike1 which did the
+// same for libdebug_target.so.
+// --------------------------------------------------------------------------
+val buildTrampoline by tasks.registering(Exec::class) {
+    group = "build"
+    description = "Cross-compiles cpp/trampoline.c to jniLibs/arm64-v8a/libTrampoline.so"
+
+    val props = Properties().apply {
+        val f = rootProject.file("local.properties")
+        if (f.exists()) f.inputStream().use { load(it) }
+    }
+    val sdkDir = props.getProperty("sdk.dir")
+        ?: System.getenv("ANDROID_HOME")
+        ?: System.getenv("ANDROID_SDK_ROOT")
+        ?: "C:/Program Files (x86)/Android/android-sdk"
+    val ndkDir = props.getProperty("ndk.dir")
+        ?: System.getenv("ANDROID_NDK_HOME")
+        ?: "$sdkDir/ndk/27.1.12297006"
+    val osName = System.getProperty("os.name").lowercase()
+    val hostTag = when {
+        osName.contains("windows") -> "windows-x86_64"
+        osName.contains("mac") || osName.contains("darwin") -> "darwin-x86_64"
+        else -> "linux-x86_64"
+    }
+    val binExt = if (osName.contains("windows")) ".cmd" else ""
+    val clang = file("$ndkDir/toolchains/llvm/prebuilt/$hostTag/bin/aarch64-linux-android26-clang$binExt")
+
+    val srcFile = file("src/main/cpp/trampoline.c")
+    val outDir = file("src/main/jniLibs/arm64-v8a")
+    val outFile = file("$outDir/libTrampoline.so")
+
+    inputs.file(srcFile)
+    inputs.property("clangPath", clang.absolutePath)
+    outputs.file(outFile)
+
+    doFirst {
+        if (!clang.exists()) throw GradleException("NDK clang not found at: ${clang.absolutePath}")
+        outDir.mkdirs()
+    }
+
+    commandLine(
+        clang.absolutePath,
+        "-O0",       // unoptimized so every C line maps to distinct instructions —
+                     // makes single-stepping through the trampoline readable.
+        "-g",        // debug info (used by Phase 2's DWARF line table).
+        "-fPIE",
+        "-pie",
+        "-Wall",
+        "-o", outFile.absolutePath,
+        srcFile.absolutePath,
+        "-ldl",
+    )
+}
+
+tasks.named("preBuild") {
+    dependsOn(buildTrampoline)
 }

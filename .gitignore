@@ -42,6 +42,7 @@ termux-pkgs/libuser_compiled.so
 **/jniLibs/*/libjnibridge.so
 **/jniLibs/*/libuser.so
 **/jniLibs/*/libdebug_target.so
+**/jniLibs/*/libTrampoline.so
 
 # ---- IDE / OS noise ----
 .DS_Store

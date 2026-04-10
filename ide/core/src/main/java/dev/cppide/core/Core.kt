@@ -7,7 +7,9 @@ import dev.cppide.core.build.BuildService
 import dev.cppide.core.build.ClangBuildService
 import dev.cppide.core.common.DefaultDispatchers
 import dev.cppide.core.common.DispatcherProvider
+import dev.cppide.core.debug.DebuggerService
 import dev.cppide.core.debug.DebuggerSpike
+import dev.cppide.core.debug.LldbDebuggerService
 import dev.cppide.core.lsp.ClangdLspService
 import dev.cppide.core.lsp.LspService
 import dev.cppide.core.project.DefaultProjectService
@@ -44,6 +46,7 @@ class Core private constructor(
     val lspService: LspService,
     val modelRepository: ModelRepository,
     val debuggerSpike: DebuggerSpike,
+    val debuggerService: DebuggerService,
 ) {
 
     /**
@@ -93,6 +96,7 @@ class Core private constructor(
                 lspService = ClangdLspService(toolchain, dispatchers),
                 modelRepository = DefaultModelRepository(app, dispatchers),
                 debuggerSpike = DebuggerSpike(toolchain, dispatchers),
+                debuggerService = LldbDebuggerService(toolchain, dispatchers),
             )
         }
     }

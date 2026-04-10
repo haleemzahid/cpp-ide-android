@@ -1,6 +1,7 @@
 package dev.cppide.ide.screens.editor
 
 import dev.cppide.core.build.Diagnostic
+import dev.cppide.core.debug.DebuggerState
 import dev.cppide.core.lsp.LspDiagnostic
 import dev.cppide.core.lsp.LspState
 import dev.cppide.core.project.Project
@@ -30,6 +31,9 @@ data class EditorState(
     // ---- LSP / IntelliSense ----
     val lspState: LspState = LspState.NotStarted,
     val lspDiagnosticsByFile: Map<String, List<LspDiagnostic>> = emptyMap(),
+
+    // ---- debugger ----
+    val debuggerState: DebuggerState = DebuggerState.Idle,
 ) {
     val errorCount: Int get() = allProblems.count { it.isError }
     val warningCount: Int get() = allProblems.count { it.severity == Diagnostic.Severity.WARNING }
@@ -79,4 +83,4 @@ enum class RunState {
     Running,
 }
 
-enum class BottomPanelTab { Terminal, Problems }
+enum class BottomPanelTab { Terminal, Problems, Debug }

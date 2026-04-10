@@ -7,6 +7,7 @@ import dev.cppide.core.Core
 import dev.cppide.core.build.BuildConfig
 import dev.cppide.core.build.BuildResult
 import dev.cppide.core.build.Diagnostic
+import dev.cppide.core.debug.DebuggerState
 import dev.cppide.core.lsp.LspCompletion
 import dev.cppide.core.project.Project
 import dev.cppide.core.run.RunConfig
@@ -40,6 +41,10 @@ class EditorViewModel(
 
     /** Active build/run task. Cancelled by [stop] or by starting a new run. */
     private var runJob: Job? = null
+
+    /** Active debug-start task. Separate from runJob so a debug launch can
+     *  coexist with a non-debug run cleanup. */
+    private var debugJob: Job? = null
 
     /** Debounced auto-save job. Reset on every keystroke. */
     private var autoSaveJob: Job? = null
@@ -96,6 +101,32 @@ class EditorViewModel(
         viewModelScope.launch {
             ensureLspStarted(project)
         }
+
+        // Mirror debugger state into editor state so the UI can render
+        // the control bar without going through Core directly.
+        viewModelScope.launch {
+            core.debuggerService.state.collect { dbg ->
+                _state.update { it.copy(debuggerState = dbg) }
+                when (dbg) {
+                    is DebuggerState.Stopped ->
+                        appendInfo("⏸ stopped  pc=0x${dbg.pc.toString(16)}  reason=${dbg.reason}  sig=${dbg.signal}")
+                    is DebuggerState.Running ->
+                        Unit /* no noise on resume */
+                    is DebuggerState.Exited ->
+                        appendInfo("■ debug session exited (code=${dbg.code}${if (dbg.signaled) ", signaled" else ""})")
+                    is DebuggerState.Failed ->
+                        appendError("debug failed: ${dbg.message}")
+                    is DebuggerState.Starting ->
+                        appendInfo("  debugger: ${dbg.stage}")
+                    DebuggerState.Idle -> Unit
+                }
+            }
+        }
+        // Pipe inferior stdout/stderr from lldb-server's O packets into
+        // the terminal view alongside the normal run output.
+        viewModelScope.launch {
+            core.debuggerService.output.collect { line -> appendStdout(line) }
+        }
     }
 
     private suspend fun ensureLspStarted(project: Project) {
@@ -131,6 +162,24 @@ class EditorViewModel(
             is EditorIntent.SwitchBottomTab -> _state.update { it.copy(bottomPanelTab = intent.tab, bottomPanelVisible = true) }
             is EditorIntent.JumpToDiagnostic -> jumpTo(intent.diagnostic)
             EditorIntent.ClearTerminal -> _state.update { it.copy(terminalLines = emptyList()) }
+
+            // ---- debug ----
+            EditorIntent.StartDebug -> startDebug()
+            EditorIntent.DebugStep -> viewModelScope.launch {
+                runCatching { core.debuggerService.stepInstruction() }
+                    .onFailure { t -> appendError("step failed: ${t.message}") }
+            }
+            EditorIntent.DebugContinue -> viewModelScope.launch {
+                runCatching { core.debuggerService.cont() }
+                    .onFailure { t -> appendError("continue failed: ${t.message}") }
+            }
+            EditorIntent.DebugPause -> viewModelScope.launch {
+                runCatching { core.debuggerService.pause() }
+                    .onFailure { t -> appendError("pause failed: ${t.message}") }
+            }
+            EditorIntent.DebugStop -> viewModelScope.launch {
+                runCatching { core.debuggerService.stop() }
+            }
 
             // ---- misc ----
             EditorIntent.DismissError -> _state.update { it.copy(errorMessage = null) }
@@ -321,6 +370,99 @@ class EditorViewModel(
         _state.update { it.copy(runState = RunState.Idle) }
     }
 
+    // ---- debug pipeline ----
+
+    /**
+     * Debug-build and launch the current file under lldb-server. Mirrors
+     * [runCurrent] but:
+     *  - Compiles with -O0 + -g (debug info, unoptimized so stepping is
+     *    predictable) and -gz=none so our Phase 2 DWARF parser doesn't
+     *    have to deal with compressed sections.
+     *  - Instead of dlopening the .so in-process, spawns the trampoline
+     *    as a separate child under lldb-server, which ptraces it.
+     *
+     * The built .so lands in a sibling path to the Run output so a
+     * subsequent Run tap doesn't pick up debug binaries (and vice versa).
+     */
+    private fun startDebug() {
+        debugJob?.cancel()
+        debugJob = viewModelScope.launch {
+            val openFile = _state.value.openFile ?: run {
+                appendInfo("No file open"); return@launch
+            }
+
+            // 0. Save in-flight edits.
+            if (!save()) return@launch
+
+            // 1. Toolchain install (idempotent).
+            appendInfo("Preparing debugger…")
+            val install = core.toolchain.install()
+            if (install.isFailure) {
+                appendError("Toolchain install failed: ${install.exceptionOrNull()?.message}")
+                return@launch
+            }
+
+            // 2. Debug build. Separate output file from Run so both can
+            // coexist on disk without cross-contamination.
+            _state.update { it.copy(
+                bottomPanelVisible = true,
+                bottomPanelTab = BottomPanelTab.Debug,
+                problems = emptyList(),
+            ) }
+            appendInfo("Debug-building ${openFile.name}…")
+
+            val source = core.projectService.resolve(openFile.relativePath)
+            val buildDir = File(core.context.filesDir, "build-debug/${state.value.project.name}")
+            buildDir.mkdirs()
+            val outputSo = File(buildDir, "libuser-debug.so")
+
+            val config = BuildConfig(
+                projectRoot = state.value.project.root,
+                sources = listOf(source),
+                output = outputSo,
+                targetApi = 26,
+                optimization = BuildConfig.Optimization.O0,
+                runtimeShim = core.runtimeShimSource(),
+                extraFlags = listOf("-g", "-gz=none"),
+            )
+
+            val buildResult = core.buildService.build(config)
+            when (buildResult) {
+                is BuildResult.Success -> {
+                    appendInfo("Debug build OK in ${buildResult.durationMs} ms")
+                    _state.update { it.copy(problems = buildResult.diagnostics) }
+                }
+                is BuildResult.Failure -> {
+                    appendError("Debug build failed (exit ${buildResult.exitCode}, ${buildResult.diagnostics.count { it.isError }} errors)")
+                    _state.update { it.copy(
+                        problems = buildResult.diagnostics,
+                        bottomPanelTab = if (buildResult.diagnostics.isNotEmpty())
+                            BottomPanelTab.Problems else BottomPanelTab.Debug,
+                    ) }
+                    return@launch
+                }
+                is BuildResult.Error -> {
+                    appendError("Debug build error: ${buildResult.message}")
+                    return@launch
+                }
+            }
+
+            // 3. Launch the debugger. Trampoline lives alongside the other
+            // jniLibs-masqueraded binaries — same directory as libclangd.so.
+            val trampoline = File(
+                core.context.applicationInfo.nativeLibraryDir,
+                "libTrampoline.so"
+            )
+            if (!trampoline.exists()) {
+                appendError("Trampoline binary missing at ${trampoline.absolutePath}")
+                return@launch
+            }
+            appendInfo("Starting lldb-server with ${trampoline.name}…")
+            core.debuggerService.start(trampoline, outputSo)
+                .onFailure { t -> appendError("debugger start failed: ${t.message}") }
+        }
+    }
+
     /**
      * Fetch clangd completions for the open file at [line]/[column]
      * (both 0-indexed). Called by the editor's completion worker thread
@@ -399,6 +541,9 @@ class EditorViewModel(
         // Stop clangd when the screen is destroyed; releases ~200MB of
         // process RAM and lets a fresh project start cleanly.
         viewModelScope.launch { core.lspService.stop() }
+        // And tear down any live debug session so lldb-server doesn't
+        // orphan itself when the user navigates back.
+        viewModelScope.launch { core.debuggerService.stop() }
     }
 
     companion object {

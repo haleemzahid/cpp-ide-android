@@ -117,10 +117,16 @@ fun EditorScreen(
                     activeTab = state.bottomPanelTab,
                     terminalLines = state.terminalLines,
                     problems = state.allProblems,
+                    debuggerState = state.debuggerState,
                     onSelectTab = { onIntent(EditorIntent.SwitchBottomTab(it)) },
                     onClose = { onIntent(EditorIntent.ToggleBottomPanel) },
                     onClearTerminal = { onIntent(EditorIntent.ClearTerminal) },
                     onJumpToProblem = { onIntent(EditorIntent.JumpToDiagnostic(it)) },
+                    onStartDebug = { onIntent(EditorIntent.StartDebug) },
+                    onDebugStep = { onIntent(EditorIntent.DebugStep) },
+                    onDebugContinue = { onIntent(EditorIntent.DebugContinue) },
+                    onDebugPause = { onIntent(EditorIntent.DebugPause) },
+                    onDebugStop = { onIntent(EditorIntent.DebugStop) },
                 )
             }
         }
