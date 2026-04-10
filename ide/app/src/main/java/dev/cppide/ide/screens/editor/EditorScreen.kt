@@ -11,11 +11,16 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import dev.cppide.core.lsp.LspCompletion
 import dev.cppide.ide.screens.editor.components.BottomPanel
+import dev.cppide.ide.screens.editor.components.EditorController
 import dev.cppide.ide.screens.editor.components.EditorPane
 import dev.cppide.ide.screens.editor.components.EditorTopBar
 import dev.cppide.ide.screens.editor.components.EmptyEditorPane
@@ -48,10 +53,16 @@ fun EditorScreen(
     onIntent: (EditorIntent) -> Unit,
     onBack: () -> Unit,
     onRequestCompletion: suspend (liveContent: String, line: Int, column: Int) -> List<LspCompletion>,
+    onRequestHover: suspend (line: Int, column: Int) -> String?,
     modifier: Modifier = Modifier,
 ) {
     val colors = CppIde.colors
     val dimens = CppIde.dimens
+
+    // Handle to the live sora editor, published by EditorPane once it's
+    // been constructed. Held here so the top bar can drive undo/redo
+    // without the screen or top bar needing to know about sora at all.
+    var controller by remember { mutableStateOf<EditorController?>(null) }
 
     // System back: dismiss overlays first, then return to welcome.
     // Without this, back falls through to the activity and exits the app.
@@ -77,6 +88,8 @@ fun EditorScreen(
                 isDirty = state.openFile?.isDirty == true,
                 onBack = onBack,
                 onToggleDrawer = { onIntent(EditorIntent.ToggleDrawer) },
+                onUndo = { controller?.undo() },
+                onRedo = { controller?.redo() },
                 onSave = { onIntent(EditorIntent.Save) },
             )
 
@@ -92,6 +105,8 @@ fun EditorScreen(
                         initialContent = openFile.savedContent,
                         onContentChange = { onIntent(EditorIntent.EditContent(it)) },
                         onRequestCompletion = onRequestCompletion,
+                        onRequestHover = onRequestHover,
+                        onControllerReady = { controller = it },
                         modifier = Modifier.fillMaxSize(),
                     )
                 }

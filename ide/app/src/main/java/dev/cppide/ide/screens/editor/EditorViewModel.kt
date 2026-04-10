@@ -358,6 +358,17 @@ class EditorViewModel(
         return items
     }
 
+    /**
+     * Fetch clangd hover info for the open file at [line]/[column] (both
+     * 0-indexed). Invoked by [EditorPane] on long-press. Returns null
+     * when clangd has nothing — caller suppresses the tooltip then.
+     */
+    suspend fun requestHover(line: Int, column: Int): String? {
+        val openFile = _state.value.openFile ?: return null
+        val file = core.projectService.resolve(openFile.relativePath)
+        return core.lspService.hover(file, line, column)
+    }
+
     // ---- diagnostic helpers ----
 
     private fun jumpTo(diagnostic: Diagnostic) {

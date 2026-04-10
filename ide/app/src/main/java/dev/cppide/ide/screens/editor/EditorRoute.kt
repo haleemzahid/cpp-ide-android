@@ -29,5 +29,6 @@ fun EditorRoute(
         onIntent = viewModel::handle,
         onBack = onBack,
         onRequestCompletion = viewModel::requestCompletion,
+        onRequestHover = viewModel::requestHover,
     )
 }
