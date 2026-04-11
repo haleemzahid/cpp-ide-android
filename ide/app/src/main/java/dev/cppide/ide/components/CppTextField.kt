@@ -34,7 +34,7 @@ fun CppTextField(
     val shape = RoundedCornerShape(dimens.radiusS)
 
     Box(
-        modifier = modifier
+        modifier = Modifier
             .fillMaxWidth()
             .clip(shape)
             .background(colors.background)
@@ -54,7 +54,7 @@ fun CppTextField(
             singleLine = true,
             textStyle = textStyle.copy(color = colors.textPrimary),
             cursorBrush = androidx.compose.ui.graphics.SolidColor(colors.accent),
-            modifier = Modifier.fillMaxWidth(),
+            modifier = modifier.fillMaxWidth(),
         )
     }
 }

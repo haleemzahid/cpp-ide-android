@@ -7,10 +7,23 @@ plugins {
     alias(libs.plugins.ksp)
 }
 
+// Load local.properties once so defaultConfig and the native build
+// tasks can both read overrides from it.
+val localProps = Properties().apply {
+    val f = rootProject.file("local.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
+}
+
 android {
     namespace = "dev.cppide.core"
     compileSdk = 36
     ndkVersion = "27.1.12297006"
+
+    buildFeatures {
+        // Needed so `buildConfigField` below generates
+        // dev.cppide.core.BuildConfig for Kotlin to read at runtime.
+        buildConfig = true
+    }
 
     defaultConfig {
         minSdk = 26
@@ -18,6 +31,19 @@ android {
             abiFilters += listOf("arm64-v8a")
         }
         consumerProguardFiles("consumer-rules.pro")
+
+        // Exercises API base URL. Override per-machine by adding
+        //   exercisesApiUrl=https://your-host.example.com
+        // to local.properties; defaults to the deployed Dokploy
+        // instance so a fresh checkout Just Works.
+        val exercisesApiUrl: String =
+            localProps.getProperty("exercisesApiUrl")
+                ?: "https://cpp-apis-1cvyqe-eb5bd1-204-168-128-241.traefik.me"
+        buildConfigField(
+            "String",
+            "EXERCISES_API_URL",
+            "\"$exercisesApiUrl\"",
+        )
     }
 
     buildTypes {
@@ -59,6 +85,13 @@ dependencies {
     // LSP client for clangd
     api(libs.lsp4j)
     api(libs.lsp4j.jsonrpc)
+
+    // LiteRT-LM — on-device LLM runtime. `api` because the AiEngine
+    // facade in dev.cppide.core.ai exposes a Kotlin Flow wrapped
+    // around this library, and Flow<String> is opaque to callers —
+    // but if we later expose Engine/Backend config types from core we
+    // want them resolvable from the app module without extra imports.
+    api(libs.litertlm.android)
 }
 
 // --------------------------------------------------------------------------

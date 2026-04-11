@@ -20,6 +20,9 @@ soraEditor = "0.23.6"
 # LSP client (clangd integration)
 lsp4j = "1.0.0"
 
+# On-device LLM inference
+litertlm = "0.10.0"
+
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
 androidx-lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version.ref = "lifecycle" }
@@ -46,6 +49,9 @@ sora-language-textmate = { group = "io.github.Rosemoe.sora-editor", name = "lang
 # LSP4J — JSON-RPC client/server framework, used by :core to talk to clangd
 lsp4j = { group = "org.eclipse.lsp4j", name = "org.eclipse.lsp4j", version.ref = "lsp4j" }
 lsp4j-jsonrpc = { group = "org.eclipse.lsp4j", name = "org.eclipse.lsp4j.jsonrpc", version.ref = "lsp4j" }
+
+# LiteRT-LM — Google's on-device LLM runtime (Kotlin API, arm64 + x86_64 AAR)
+litertlm-android = { group = "com.google.ai.edge.litertlm", name = "litertlm-android", version.ref = "litertlm" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

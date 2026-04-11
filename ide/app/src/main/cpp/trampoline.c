@@ -16,6 +16,7 @@
 
 #include <dlfcn.h>
 #include <libgen.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -118,6 +119,18 @@ int main(int argc, char** argv) {
     }
     fprintf(stderr, "T> dlsym ok, fn=%p\n", (void*)fn);
     fflush(stderr);
+
+    // Signal the debugger (if any) that the user .so is loaded and
+    // resolved. Raise SIGTRAP, which under ptrace stops the tracee and
+    // lets the tracer refresh its loaded-library list and set pending
+    // breakpoints at real runtime addresses. Non-traced runs see the
+    // default SIGTRAP handler, which terminates the process — but the
+    // trampoline is only ever launched under ptrace, so this is fine
+    // in practice. The tracer swallows the signal on `vCont;c` (sends
+    // plain `c` without the `C<sig>` signal delivery form).
+    fprintf(stderr, "T> raising SIGTRAP for debugger sync\n");
+    fflush(stderr);
+    raise(SIGTRAP);
 
     // argc=0 / argv=NULL — user code that inspects argv gets a clean
     // empty environment. Real stdout/stderr are already wired to the

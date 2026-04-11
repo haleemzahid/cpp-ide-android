@@ -1,9 +1,14 @@
 package dev.cppide.ide
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -13,7 +18,10 @@ import androidx.compose.runtime.setValue
 import dev.cppide.core.Core
 import dev.cppide.core.project.Project
 import dev.cppide.core.session.RecentProject
+import dev.cppide.ide.screens.about.AboutRoute
+import dev.cppide.ide.screens.chat.ChatRoute
 import dev.cppide.ide.screens.editor.EditorRoute
+import dev.cppide.ide.screens.settings.SettingsRoute
 import dev.cppide.ide.screens.welcome.NewProjectDialog
 import dev.cppide.ide.screens.welcome.WelcomeRoute
 import dev.cppide.ide.theme.CppIdeTheme
@@ -28,15 +36,37 @@ import java.io.File
  */
 class MainActivity : ComponentActivity() {
 
+    private val notificationPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* result ignored */ }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         val core = (application as CppIdeApp).core
 
+        maybeRequestNotificationPermission()
+
         setContent {
             CppIdeTheme {
                 AppNavigation(core = core)
             }
+        }
+    }
+
+    /**
+     * On Android 13+ the system silently drops foreground-service progress
+     * notifications unless POST_NOTIFICATIONS has been granted. Ask once
+     * on launch — the user can still deny; the download service works
+     * without a visible notification, just less informatively.
+     */
+    private fun maybeRequestNotificationPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        val granted = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.POST_NOTIFICATIONS,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
 }
@@ -45,6 +75,9 @@ class MainActivity : ComponentActivity() {
 private sealed interface Destination {
     data object Welcome : Destination
     data class Editor(val project: Project) : Destination
+    data object Settings : Destination
+    data object Chat : Destination
+    data object About : Destination
 }
 
 @Composable
@@ -62,8 +95,8 @@ private fun AppNavigation(core: Core) {
                     destination = Destination.Editor(project)
                 },
                 onCreateNew = { showNewProject = true },
-                onOpenFolder = { /* TODO: import .zip flow */ },
-                onSettings = { /* TODO: settings screen */ },
+                onChat = { destination = Destination.Chat },
+                onSettings = { destination = Destination.Settings },
             )
         }
         is Destination.Editor -> {
@@ -71,6 +104,25 @@ private fun AppNavigation(core: Core) {
                 core = core,
                 project = current.project,
                 onBack = { destination = Destination.Welcome },
+            )
+        }
+        Destination.Settings -> {
+            SettingsRoute(
+                core = core,
+                onBack = { destination = Destination.Welcome },
+                onOpenAbout = { destination = Destination.About },
+            )
+        }
+        Destination.Chat -> {
+            ChatRoute(
+                core = core,
+                onBack = { destination = Destination.Welcome },
+                onOpenSettings = { destination = Destination.Settings },
+            )
+        }
+        Destination.About -> {
+            AboutRoute(
+                onBack = { destination = Destination.Settings },
             )
         }
     }

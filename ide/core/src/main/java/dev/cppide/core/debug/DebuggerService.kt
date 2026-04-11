@@ -21,6 +21,16 @@ interface DebuggerService {
     val state: StateFlow<DebuggerState>
 
     /**
+     * Breakpoints the user has set. Tracked separately from [state] so
+     * they survive across start/stop cycles of the debugger (the user's
+     * red dots in the editor gutter shouldn't vanish when the inferior
+     * exits). Each entry carries whether the debugger has verified it
+     * against a real address — unverified means "set before the binary
+     * was debug-loaded; will take effect next session".
+     */
+    val breakpoints: StateFlow<Map<SourceBreakpoint, BreakpointState>>
+
+    /**
      * Inferior stdout + stderr lines as the target runs. Emitted from
      * decoded `O` packets on the GDB-remote stream. Consumers typically
      * pipe these into the terminal view.
@@ -40,6 +50,18 @@ interface DebuggerService {
      * the runtime shim.
      */
     suspend fun start(trampolineBinary: File, userLibrary: File): Result<Unit>
+
+    /**
+     * Toggle a source-line breakpoint. Adds it to [breakpoints] if not
+     * present, removes if present. If the debugger is running, sends
+     * the matching `$Z0` / `$z0` packet and updates the entry's
+     * verification state. If the debugger is idle, the breakpoint is
+     * recorded and will be applied at the start of the next session.
+     */
+    suspend fun toggleBreakpoint(file: String, line: Int)
+
+    /** Remove all breakpoints. Fires off $z0 for each live one. */
+    suspend fun clearBreakpoints()
 
     /** Single-step one instruction on the current thread. Target must be stopped. */
     suspend fun stepInstruction()

@@ -21,6 +21,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.Chat
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.BugReport
 import androidx.compose.material.icons.outlined.FolderOpen
@@ -53,7 +54,7 @@ fun WelcomeScreen(
     onOpenProject: (RecentProject) -> Unit,
     onTogglePin: (RecentProject) -> Unit,
     onCreateNew: () -> Unit,
-    onOpenFolder: () -> Unit,
+    onChat: () -> Unit,
     onSettings: () -> Unit,
     onRunDebugSpike: () -> Unit,
     onRunGdbserverSpike: () -> Unit,
@@ -71,11 +72,18 @@ fun WelcomeScreen(
         CppTopBar(
             title = "C++ IDE",
             trailing = {
-                CppIconButton(
-                    icon = Icons.Outlined.Settings,
-                    contentDescription = "Settings",
-                    onClick = onSettings,
-                )
+                Row {
+                    CppIconButton(
+                        icon = Icons.AutoMirrored.Outlined.Chat,
+                        contentDescription = "Chat with AI",
+                        onClick = onChat,
+                    )
+                    CppIconButton(
+                        icon = Icons.Outlined.Settings,
+                        contentDescription = "Settings",
+                        onClick = onSettings,
+                    )
+                }
             },
         )
 
@@ -113,23 +121,12 @@ fun WelcomeScreen(
             item { Spacer(Modifier.height(dimens.spacingL)) }
 
             item {
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(dimens.spacingM),
+                CppButton(
+                    text = "New project",
+                    onClick = onCreateNew,
+                    style = CppButtonStyle.Primary,
                     modifier = Modifier.fillMaxWidth(),
-                ) {
-                    CppButton(
-                        text = "New project",
-                        onClick = onCreateNew,
-                        style = CppButtonStyle.Primary,
-                        modifier = Modifier.weight(1f),
-                    )
-                    CppButton(
-                        text = "Open folder",
-                        onClick = onOpenFolder,
-                        style = CppButtonStyle.Secondary,
-                        modifier = Modifier.weight(1f),
-                    )
-                }
+                )
             }
 
             // ---- TEMPORARY: debugger spike trigger ----

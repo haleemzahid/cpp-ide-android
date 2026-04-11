@@ -38,6 +38,11 @@ sealed class DebuggerState {
         val reason: StopReason,
         val signal: Int,
         val threadId: String,
+        /** Resolved source location for [pc] via DWARF line info, or null
+         *  if the PC is outside any known compilation unit (e.g. stopped
+         *  inside ld-android.so or libc). */
+        val sourceFile: String? = null,
+        val sourceLine: Int? = null,
     ) : DebuggerState()
     data class Exited(val code: Int, val signaled: Boolean) : DebuggerState()
     data class Failed(val message: String) : DebuggerState()

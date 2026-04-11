@@ -1,7 +1,9 @@
 package dev.cppide.ide.screens.editor
 
 import dev.cppide.core.build.Diagnostic
+import dev.cppide.core.debug.BreakpointState
 import dev.cppide.core.debug.DebuggerState
+import dev.cppide.core.debug.SourceBreakpoint
 import dev.cppide.core.lsp.LspDiagnostic
 import dev.cppide.core.lsp.LspState
 import dev.cppide.core.project.Project
@@ -16,9 +18,18 @@ data class EditorState(
 
     // ---- file system ----
     val fileTree: ProjectNode.Directory? = null,
-    val openFile: OpenFile? = null,
+    /** All currently open editor tabs, in tab-strip order. */
+    val openTabs: List<OpenFile> = emptyList(),
+    /** Index into [openTabs] for the active tab, or null if no tabs open. */
+    val activeTabIndex: Int? = null,
     val drawerOpen: Boolean = false,
     val saving: Boolean = false,
+    /** True while a file read is in flight (drives the editor loading bar). */
+    val fileLoading: Boolean = false,
+    /** True while the initial project open + tab restore is in flight. */
+    val projectLoading: Boolean = true,
+    /** When viewing a .md file, true = rendered preview, false = raw source. */
+    val markdownPreview: Boolean = true,
     val errorMessage: String? = null,
 
     // ---- build / run ----
@@ -34,7 +45,13 @@ data class EditorState(
 
     // ---- debugger ----
     val debuggerState: DebuggerState = DebuggerState.Idle,
+    /** All user breakpoints, keyed by (file, line). Survives debug sessions. */
+    val breakpoints: Map<SourceBreakpoint, BreakpointState> = emptyMap(),
 ) {
+    /** The currently active tab's file, or null when no tabs are open. */
+    val openFile: OpenFile?
+        get() = activeTabIndex?.let { openTabs.getOrNull(it) }
+
     val errorCount: Int get() = allProblems.count { it.isError }
     val warningCount: Int get() = allProblems.count { it.severity == Diagnostic.Severity.WARNING }
     val isBusy: Boolean get() = runState != RunState.Idle
@@ -60,6 +77,20 @@ data class EditorState(
      */
     val allProblems: List<Diagnostic>
         get() = problems + lspDiagnostics.map { it.toBuildDiagnostic() }
+
+    /** Breakpoints that apply to whatever file is currently open,
+     *  indexed by 1-based line so the editor gutter can look them up
+     *  in O(1) while rendering. */
+    val breakpointLinesForOpenFile: Map<Int, BreakpointState>
+        get() {
+            val openBasename = openFile?.relativePath
+                ?.substringAfterLast('/')
+                ?.substringAfterLast('\\')
+                ?: return emptyMap()
+            return breakpoints.values
+                .filter { it.source.fileBasename == openBasename }
+                .associateBy { it.line }
+        }
 }
 
 /**

@@ -1,7 +1,9 @@
 package dev.cppide.core
 
 import android.content.Context
+import dev.cppide.core.ai.AiEngine
 import dev.cppide.core.ai.DefaultModelRepository
+import dev.cppide.core.ai.LiteRtAiEngine
 import dev.cppide.core.ai.ModelRepository
 import dev.cppide.core.build.BuildService
 import dev.cppide.core.build.ClangBuildService
@@ -10,6 +12,7 @@ import dev.cppide.core.common.DispatcherProvider
 import dev.cppide.core.debug.DebuggerService
 import dev.cppide.core.debug.DebuggerSpike
 import dev.cppide.core.debug.LldbDebuggerService
+import dev.cppide.core.exercises.ExercisesApiClient
 import dev.cppide.core.lsp.ClangdLspService
 import dev.cppide.core.lsp.LspService
 import dev.cppide.core.project.DefaultProjectService
@@ -45,8 +48,10 @@ class Core private constructor(
     val sessionRepository: SessionRepository,
     val lspService: LspService,
     val modelRepository: ModelRepository,
+    val aiEngine: AiEngine,
     val debuggerSpike: DebuggerSpike,
     val debuggerService: DebuggerService,
+    val exercisesApi: ExercisesApiClient,
 ) {
 
     /**
@@ -95,8 +100,13 @@ class Core private constructor(
                 sessionRepository = RoomSessionRepository(app, dispatchers),
                 lspService = ClangdLspService(toolchain, dispatchers),
                 modelRepository = DefaultModelRepository(app, dispatchers),
+                aiEngine = LiteRtAiEngine(
+                    dispatchers = dispatchers,
+                    cacheDir = File(app.filesDir, "ai-cache"),
+                ),
                 debuggerSpike = DebuggerSpike(toolchain, dispatchers),
                 debuggerService = LldbDebuggerService(toolchain, dispatchers),
+                exercisesApi = ExercisesApiClient(dispatchers),
             )
         }
     }

@@ -12,11 +12,20 @@ import dev.cppide.core.lsp.LspCompletion
 import dev.cppide.core.project.Project
 import dev.cppide.core.run.RunConfig
 import dev.cppide.core.run.RunEvent
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.update
@@ -33,11 +42,16 @@ import java.util.concurrent.atomic.AtomicInteger
  */
 class EditorViewModel(
     private val core: Core,
-    project: Project,
+    private val project: Project,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(EditorState(project = project))
     val state: StateFlow<EditorState> = _state.asStateFlow()
+
+    /** One-shot UI events that can't be represented as state (share sheet,
+     *  snackbars). Collected once in the screen's LaunchedEffect. */
+    private val _events = MutableSharedFlow<EditorEvent>(extraBufferCapacity = 4)
+    val events: SharedFlow<EditorEvent> = _events.asSharedFlow()
 
     /** Active build/run task. Cancelled by [stop] or by starting a new run. */
     private var runJob: Job? = null
@@ -59,12 +73,14 @@ class EditorViewModel(
         viewModelScope.launch {
             core.projectService.open(project.root, project.name)
                 .onSuccess { _ ->
-                    _state.update { it.copy(fileTree = core.projectService.fileTree.value) }
-                    val mainCpp = core.projectService.fileTree.value?.children
-                        ?.firstOrNull { node -> node.name == "main.cpp" }
-                    if (mainCpp != null) handle(EditorIntent.OpenFile(mainCpp.relativePath))
+                    val tree = core.projectService.fileTree.value
+                    _state.update { it.copy(fileTree = tree) }
+                    restoreOrSeedTabs(tree)
+                    _state.update { it.copy(projectLoading = false) }
                 }
-                .onFailure { t -> _state.update { it.copy(errorMessage = t.message) } }
+                .onFailure { t ->
+                    _state.update { it.copy(errorMessage = t.message, projectLoading = false) }
+                }
         }
 
         // Mirror clangd state + diagnostics into our screen state.
@@ -127,6 +143,13 @@ class EditorViewModel(
         viewModelScope.launch {
             core.debuggerService.output.collect { line -> appendStdout(line) }
         }
+        // Mirror the debugger's breakpoint table into screen state so
+        // the gutter can render red dots for set lines.
+        viewModelScope.launch {
+            core.debuggerService.breakpoints.collect { map ->
+                _state.update { it.copy(breakpoints = map) }
+            }
+        }
     }
 
     private suspend fun ensureLspStarted(project: Project) {
@@ -147,14 +170,27 @@ class EditorViewModel(
             EditorIntent.ToggleDrawer -> _state.update { it.copy(drawerOpen = !it.drawerOpen) }
             EditorIntent.CloseDrawer -> _state.update { it.copy(drawerOpen = false) }
             is EditorIntent.OpenFile -> openFile(intent.relativePath)
+            is EditorIntent.CloseTab -> closeTab(intent.index)
+            is EditorIntent.SelectTab -> selectTab(intent.index)
             is EditorIntent.EditContent -> {
                 _state.update { s ->
-                    s.copy(openFile = s.openFile?.copy(content = intent.newContent))
+                    val i = s.activeTabIndex ?: return@update s
+                    val updated = s.openTabs.toMutableList().also { list ->
+                        list[i] = list[i].copy(content = intent.newContent)
+                    }
+                    s.copy(openTabs = updated)
                 }
                 scheduleAutoSave()
                 scheduleLspDidChange(intent.newContent)
             }
             EditorIntent.Save -> viewModelScope.launch { save() }
+            EditorIntent.ShareActiveFile -> shareActiveFile()
+            EditorIntent.ToggleMarkdownPreview ->
+                _state.update { it.copy(markdownPreview = !it.markdownPreview) }
+            is EditorIntent.CreateFile -> createFile(intent.parentRelativePath, intent.name)
+            is EditorIntent.CreateDirectory -> createDirectory(intent.parentRelativePath, intent.name)
+            is EditorIntent.DeleteFile -> deleteFile(intent.relativePath)
+            is EditorIntent.RenameFile -> renameFile(intent.relativePath, intent.newName)
 
             // ---- build / run ----
             EditorIntent.RunOrStop -> if (_state.value.isBusy) stop() else runCurrent()
@@ -167,18 +203,34 @@ class EditorViewModel(
             EditorIntent.StartDebug -> startDebug()
             EditorIntent.DebugStep -> viewModelScope.launch {
                 runCatching { core.debuggerService.stepInstruction() }
-                    .onFailure { t -> appendError("step failed: ${t.message}") }
+                    .onFailure { t -> if (!t.isShutdownRace()) appendError("step failed: ${t.message}") }
             }
             EditorIntent.DebugContinue -> viewModelScope.launch {
                 runCatching { core.debuggerService.cont() }
-                    .onFailure { t -> appendError("continue failed: ${t.message}") }
+                    .onFailure { t -> if (!t.isShutdownRace()) appendError("continue failed: ${t.message}") }
             }
             EditorIntent.DebugPause -> viewModelScope.launch {
                 runCatching { core.debuggerService.pause() }
-                    .onFailure { t -> appendError("pause failed: ${t.message}") }
+                    .onFailure { t -> if (!t.isShutdownRace()) appendError("pause failed: ${t.message}") }
             }
             EditorIntent.DebugStop -> viewModelScope.launch {
                 runCatching { core.debuggerService.stop() }
+            }
+            is EditorIntent.ToggleBreakpoint -> {
+                val file = _state.value.openFile?.relativePath ?: return@handle
+                viewModelScope.launch {
+                    runCatching {
+                        core.debuggerService.toggleBreakpoint(file, intent.line)
+                    }.onFailure { t -> appendError("toggle bp: ${t.message}") }
+                }
+            }
+            is EditorIntent.RemoveBreakpoint -> viewModelScope.launch {
+                runCatching {
+                    core.debuggerService.toggleBreakpoint(
+                        intent.breakpoint.fileBasename,
+                        intent.breakpoint.line,
+                    )
+                }.onFailure { t -> appendError("remove bp: ${t.message}") }
             }
 
             // ---- misc ----
@@ -188,23 +240,291 @@ class EditorViewModel(
 
     // ---- file ops ----
 
+    /**
+     * Open a file into a tab. If the file is already open in a tab, just
+     * activate it — otherwise read it from disk and append a new tab.
+     * Sets [EditorState.fileLoading] while the read is in flight so the
+     * screen can show a thin progress bar (large files on slow storage
+     * take a visible fraction of a second).
+     */
     private fun openFile(relativePath: String) {
+        // Close the drawer and flip the loading flag synchronously —
+        // BEFORE touching the filesystem. The previous version waited for
+        // the disk read to complete before closing the drawer, which on
+        // slower storage left the drawer sitting on screen for a second
+        // or two after the tap, feeling like the tap was ignored.
+        _state.update { it.copy(drawerOpen = false, fileLoading = true) }
+
         viewModelScope.launch {
+            // If the file is already open as a tab, just switch.
+            val existing = _state.value.openTabs.indexOfFirst { it.relativePath == relativePath }
+            if (existing >= 0) {
+                _state.update { it.copy(activeTabIndex = existing, fileLoading = false) }
+                persistUiState()
+                return@launch
+            }
+
+            // Tear down any live debug session before switching — the
+            // debuggee was compiled from the old file, so stepping into
+            // it while the editor shows a different file is confusing
+            // at best and misleading at worst.
+            if (_state.value.debuggerState.isActive) {
+                runCatching { core.debuggerService.stop() }
+            }
+
             core.projectService.read(relativePath)
                 .onSuccess { content ->
                     _state.update { s ->
+                        val newTab = OpenFile(relativePath, content, content)
+                        val tabs = s.openTabs + newTab
                         s.copy(
-                            openFile = OpenFile(relativePath, content, content),
-                            drawerOpen = false,
+                            openTabs = tabs,
+                            activeTabIndex = tabs.lastIndex,
+                            fileLoading = false,
                         )
                     }
+                    persistUiState()
                     // Tell clangd we opened the file. Language id by extension.
                     val file = core.projectService.resolve(relativePath)
                     val lang = if (file.extension.lowercase() == "c") "c" else "cpp"
                     core.lspService.didOpen(file, lang, content)
                 }
-                .onFailure { t -> _state.update { it.copy(errorMessage = "open: ${t.message}") } }
+                .onFailure { t ->
+                    _state.update { it.copy(errorMessage = "open: ${t.message}", fileLoading = false) }
+                }
         }
+    }
+
+    private fun selectTab(index: Int) {
+        val s = _state.value
+        if (index !in s.openTabs.indices) return
+        if (index == s.activeTabIndex) return
+        if (s.debuggerState.isActive) {
+            viewModelScope.launch { runCatching { core.debuggerService.stop() } }
+        }
+        _state.update { it.copy(activeTabIndex = index) }
+        persistUiState()
+    }
+
+    private fun closeTab(index: Int) {
+        viewModelScope.launch {
+            val s = _state.value
+            if (index !in s.openTabs.indices) return@launch
+            // Flush any pending edits in the tab being closed before
+            // dropping it, so the user doesn't lose work on a fast close.
+            val closing = s.openTabs[index]
+            if (closing.isDirty) {
+                runCatching { core.projectService.write(closing.relativePath, closing.content) }
+            }
+            // Tell clangd we're done with the file.
+            val file = core.projectService.resolve(closing.relativePath)
+            runCatching { core.lspService.didClose(file) }
+
+            _state.update { cur ->
+                val tabs = cur.openTabs.toMutableList().also { it.removeAt(index) }
+                val newActive = when {
+                    tabs.isEmpty() -> null
+                    cur.activeTabIndex == null -> null
+                    index < cur.activeTabIndex -> cur.activeTabIndex - 1
+                    index == cur.activeTabIndex -> index.coerceAtMost(tabs.lastIndex)
+                    else -> cur.activeTabIndex
+                }
+                cur.copy(openTabs = tabs, activeTabIndex = newActive)
+            }
+            persistUiState()
+        }
+    }
+
+    private fun shareActiveFile() {
+        val openFile = _state.value.openFile ?: return
+        _events.tryEmit(EditorEvent.ShareFile(openFile.name, openFile.content))
+    }
+
+    private fun createFile(parentRelativePath: String, name: String) {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty() || trimmed.any { it == '/' || it == '\\' || it == ':' }) {
+            _state.update { it.copy(errorMessage = "invalid file name: $name") }
+            return
+        }
+        val rel = if (parentRelativePath.isEmpty()) trimmed else "$parentRelativePath/$trimmed"
+        viewModelScope.launch {
+            core.projectService.createFile(rel, "")
+                .onSuccess {
+                    _state.update { it.copy(fileTree = core.projectService.fileTree.value) }
+                    handle(EditorIntent.OpenFile(rel))
+                }
+                .onFailure { t -> _state.update { it.copy(errorMessage = "create: ${t.message}") } }
+        }
+    }
+
+    private fun deleteFile(relativePath: String) {
+        viewModelScope.launch {
+            // If the file is open as a tab, drop it first so the editor
+            // doesn't hold a stale reference to a path that no longer exists.
+            val tabIndex = _state.value.openTabs.indexOfFirst { it.relativePath == relativePath }
+            if (tabIndex >= 0) {
+                val file = core.projectService.resolve(relativePath)
+                runCatching { core.lspService.didClose(file) }
+                _state.update { s ->
+                    val tabs = s.openTabs.toMutableList().also { it.removeAt(tabIndex) }
+                    val newActive = when {
+                        tabs.isEmpty() -> null
+                        s.activeTabIndex == null -> null
+                        tabIndex < s.activeTabIndex -> s.activeTabIndex - 1
+                        tabIndex == s.activeTabIndex -> tabIndex.coerceAtMost(tabs.lastIndex)
+                        else -> s.activeTabIndex
+                    }
+                    s.copy(openTabs = tabs, activeTabIndex = newActive)
+                }
+                persistUiState()
+            }
+            core.projectService.delete(relativePath)
+                .onSuccess {
+                    _state.update { it.copy(fileTree = core.projectService.fileTree.value) }
+                }
+                .onFailure { t -> _state.update { it.copy(errorMessage = "delete: ${t.message}") } }
+        }
+    }
+
+    private fun renameFile(relativePath: String, newName: String) {
+        val trimmed = newName.trim()
+        if (trimmed.isEmpty() || trimmed.any { it == '/' || it == '\\' || it == ':' }) {
+            _state.update { it.copy(errorMessage = "invalid file name: $newName") }
+            return
+        }
+        val parent = relativePath.substringBeforeLast('/', "")
+        val target = if (parent.isEmpty()) trimmed else "$parent/$trimmed"
+        if (target == relativePath) return
+        viewModelScope.launch {
+            // Flush any pending edits in the tab before rename so the old
+            // path contains the user's latest content.
+            val tabIndex = _state.value.openTabs.indexOfFirst { it.relativePath == relativePath }
+            if (tabIndex >= 0) {
+                val tab = _state.value.openTabs[tabIndex]
+                if (tab.isDirty) {
+                    runCatching { core.projectService.write(relativePath, tab.content) }
+                }
+                runCatching {
+                    core.lspService.didClose(core.projectService.resolve(relativePath))
+                }
+            }
+            core.projectService.rename(relativePath, target)
+                .onSuccess {
+                    _state.update { s ->
+                        val tabs = s.openTabs.toMutableList()
+                        if (tabIndex >= 0) {
+                            tabs[tabIndex] = tabs[tabIndex].copy(
+                                relativePath = target,
+                                savedContent = tabs[tabIndex].content,
+                            )
+                        }
+                        s.copy(
+                            openTabs = tabs,
+                            fileTree = core.projectService.fileTree.value,
+                        )
+                    }
+                    if (tabIndex >= 0) {
+                        val file = core.projectService.resolve(target)
+                        val lang = if (file.extension.lowercase() == "c") "c" else "cpp"
+                        val content = _state.value.openTabs[tabIndex].content
+                        runCatching { core.lspService.didOpen(file, lang, content) }
+                    }
+                    persistUiState()
+                }
+                .onFailure { t -> _state.update { it.copy(errorMessage = "rename: ${t.message}") } }
+        }
+    }
+
+    private fun createDirectory(parentRelativePath: String, name: String) {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty() || trimmed.any { it == '/' || it == '\\' || it == ':' }) {
+            _state.update { it.copy(errorMessage = "invalid folder name: $name") }
+            return
+        }
+        val rel = if (parentRelativePath.isEmpty()) trimmed else "$parentRelativePath/$trimmed"
+        viewModelScope.launch {
+            core.projectService.createDirectory(rel)
+                .onSuccess {
+                    _state.update { it.copy(fileTree = core.projectService.fileTree.value) }
+                }
+                .onFailure { t -> _state.update { it.copy(errorMessage = "mkdir: ${t.message}") } }
+        }
+    }
+
+    /**
+     * Restore the tab set persisted from a previous session. If no persisted
+     * state exists, fall back to: first main.cpp under root, else first
+     * file found in a DFS walk of the tree.
+     *
+     * Reads happen inline on the caller's coroutine so that by the time the
+     * init block flips [EditorState.projectLoading] off the tabs already
+     * contain content — preventing a multi-second window where the editor
+     * shows an empty pane after the welcome→editor transition.
+     */
+    private suspend fun restoreOrSeedTabs(tree: dev.cppide.core.project.ProjectNode.Directory?) {
+        tree ?: return
+        val saved = ProjectUiState.load(core.context, _state.value.project.root)
+        val paths = saved.openPaths.filter { pathExistsInTree(tree, it) }
+        val toOpen = if (paths.isNotEmpty()) paths else listOfNotNull(
+            tree.children.firstOrNull { it.name == "main.cpp" }?.relativePath
+                ?: firstFileIn(tree),
+        )
+        if (toOpen.isEmpty()) return
+
+        val loaded = mutableListOf<OpenFile>()
+        for (path in toOpen) {
+            val content = core.projectService.read(path).getOrNull() ?: continue
+            loaded.add(OpenFile(path, content, content))
+        }
+        if (loaded.isEmpty()) return
+
+        val activePath = saved.activePath?.takeIf { paths.isNotEmpty() }
+        val activeIdx = loaded.indexOfFirst { it.relativePath == activePath }
+            .takeIf { it >= 0 } ?: 0
+
+        _state.update { s ->
+            s.copy(openTabs = loaded, activeTabIndex = activeIdx)
+        }
+        persistUiState()
+
+        // Tell clangd about each restored tab. didOpen is idempotent from
+        // the server's POV once clangd is ready; if it isn't yet, the
+        // lspState collector replays didOpen for the active file on the
+        // Ready transition.
+        for (tab in loaded) {
+            val file = core.projectService.resolve(tab.relativePath)
+            val lang = if (file.extension.lowercase() == "c") "c" else "cpp"
+            runCatching { core.lspService.didOpen(file, lang, tab.content) }
+        }
+    }
+
+    private fun pathExistsInTree(
+        tree: dev.cppide.core.project.ProjectNode.Directory,
+        path: String,
+    ): Boolean {
+        fun walk(node: dev.cppide.core.project.ProjectNode): Boolean = when (node) {
+            is dev.cppide.core.project.ProjectNode.File -> node.relativePath == path
+            is dev.cppide.core.project.ProjectNode.Directory -> node.children.any { walk(it) }
+        }
+        return walk(tree)
+    }
+
+    private fun firstFileIn(node: dev.cppide.core.project.ProjectNode): String? = when (node) {
+        is dev.cppide.core.project.ProjectNode.File -> node.relativePath
+        is dev.cppide.core.project.ProjectNode.Directory ->
+            node.children.asSequence().mapNotNull { firstFileIn(it) }.firstOrNull()
+    }
+
+    private fun persistUiState() {
+        val s = _state.value
+        ProjectUiState.save(
+            context = core.context,
+            projectRoot = s.project.root,
+            state = ProjectUiState(
+                openPaths = s.openTabs.map { it.relativePath },
+                activePath = s.openFile?.relativePath,
+            ),
+        )
     }
 
     /**
@@ -237,15 +557,21 @@ class EditorViewModel(
     }
 
     private suspend fun save(): Boolean {
-        val openFile = _state.value.openFile ?: return true
+        val activeIndex = _state.value.activeTabIndex ?: return true
+        val openFile = _state.value.openTabs.getOrNull(activeIndex) ?: return true
         if (!openFile.isDirty) return true
         _state.update { it.copy(saving = true) }
         return core.projectService.write(openFile.relativePath, openFile.content)
             .fold(
                 onSuccess = {
                     _state.update { s ->
+                        val tabs = s.openTabs.toMutableList()
+                        val idx = tabs.indexOfFirst { it.relativePath == openFile.relativePath }
+                        if (idx >= 0) {
+                            tabs[idx] = tabs[idx].copy(savedContent = tabs[idx].content)
+                        }
                         s.copy(
-                            openFile = openFile.copy(savedContent = openFile.content),
+                            openTabs = tabs,
                             saving = false,
                             fileTree = core.projectService.fileTree.value,
                         )
@@ -538,12 +864,31 @@ class EditorViewModel(
 
     override fun onCleared() {
         super.onCleared()
-        // Stop clangd when the screen is destroyed; releases ~200MB of
-        // process RAM and lets a fresh project start cleanly.
-        viewModelScope.launch { core.lspService.stop() }
-        // And tear down any live debug session so lldb-server doesn't
-        // orphan itself when the user navigates back.
-        viewModelScope.launch { core.debuggerService.stop() }
+        // Tear down on a scope we control, NOT viewModelScope — that
+        // scope is being cancelled as part of onCleared and any launches
+        // we make here would race with the cancellation (clangd might
+        // leak a 200 MB process, lldb-server might leak an orphan).
+        // runBlocking gives us a synchronous barrier; we're already off
+        // any UI thread by the time onCleared is invoked from the
+        // ViewModelStore, so blocking is safe.
+        runBlocking {
+            withContext(NonCancellable + Dispatchers.IO) {
+                runCatching { core.debuggerService.stop() }
+                runCatching { core.lspService.stop() }
+            }
+        }
+    }
+
+    /** Is this throwable the expected "we tore down mid-flight" signal, or
+     *  a real bug? Used to filter "continue failed: Channel was closed"
+     *  noise from the terminal when the user navigates away during a
+     *  debug session — cleanup races with in-flight commands and that's
+     *  fine. */
+    private fun Throwable.isShutdownRace(): Boolean {
+        val n = this::class.java.simpleName
+        return n == "ClosedReceiveChannelException" ||
+            n == "CancellationException" ||
+            message?.contains("Channel was closed") == true
     }
 
     companion object {

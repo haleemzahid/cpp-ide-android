@@ -1,11 +1,15 @@
 package dev.cppide.ide.screens.editor
 
+import android.content.Intent
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalContext
 import dev.cppide.core.Core
 import dev.cppide.core.project.Project
+import kotlinx.coroutines.flow.collect
 
 /**
  * Wires [Core] + a [Project] into [EditorViewModel] + [EditorScreen]. The
@@ -23,6 +27,26 @@ fun EditorRoute(
         EditorViewModel(core, project)
     }
     val state by viewModel.state.collectAsState()
+    val context = LocalContext.current
+
+    // Listen for one-shot events from the VM. Share is the only one
+    // right now — others (snackbars, dialogs) will join later.
+    LaunchedEffect(viewModel) {
+        viewModel.events.collect { event ->
+            when (event) {
+                is EditorEvent.ShareFile -> {
+                    val send = Intent(Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(Intent.EXTRA_SUBJECT, event.fileName)
+                        putExtra(Intent.EXTRA_TEXT, event.content)
+                    }
+                    context.startActivity(
+                        Intent.createChooser(send, "Share ${event.fileName}")
+                    )
+                }
+            }
+        }
+    }
 
     EditorScreen(
         state = state,

@@ -10,7 +10,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import dev.cppide.core.build.Diagnostic
+import dev.cppide.core.debug.BreakpointState
 import dev.cppide.core.debug.DebuggerState
+import dev.cppide.core.debug.SourceBreakpoint
 import dev.cppide.ide.components.CppHorizontalDivider
 import dev.cppide.ide.screens.editor.BottomPanelTab
 import dev.cppide.ide.screens.editor.TerminalLine
@@ -27,6 +29,7 @@ fun BottomPanel(
     terminalLines: List<TerminalLine>,
     problems: List<Diagnostic>,
     debuggerState: DebuggerState,
+    breakpoints: Map<SourceBreakpoint, BreakpointState>,
     onSelectTab: (BottomPanelTab) -> Unit,
     onClose: () -> Unit,
     onClearTerminal: () -> Unit,
@@ -36,6 +39,7 @@ fun BottomPanel(
     onDebugContinue: () -> Unit,
     onDebugPause: () -> Unit,
     onDebugStop: () -> Unit,
+    onToggleBreakpoint: (SourceBreakpoint) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val colors = CppIde.colors
@@ -64,11 +68,13 @@ fun BottomPanel(
                 )
                 BottomPanelTab.Debug -> DebugPanel(
                     debuggerState = debuggerState,
+                    breakpoints = breakpoints,
                     onStart = onStartDebug,
                     onStep = onDebugStep,
                     onContinue = onDebugContinue,
                     onPause = onDebugPause,
                     onStop = onDebugStop,
+                    onToggleBreakpoint = onToggleBreakpoint,
                 )
             }
         }

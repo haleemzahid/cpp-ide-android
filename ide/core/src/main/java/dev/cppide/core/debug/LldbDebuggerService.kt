@@ -8,12 +8,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.ClosedReceiveChannelException
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -68,6 +70,23 @@ class LldbDebuggerService(
 
     private val _state = MutableStateFlow<DebuggerState>(DebuggerState.Idle)
     override val state: StateFlow<DebuggerState> = _state.asStateFlow()
+
+    private val _breakpoints = MutableStateFlow<Map<SourceBreakpoint, BreakpointState>>(emptyMap())
+    override val breakpoints: StateFlow<Map<SourceBreakpoint, BreakpointState>> =
+        _breakpoints.asStateFlow()
+
+    /** Parsed debug info for the current session's binary. null until the
+     *  user starts a debug session that loads it. */
+    private var sourceMap: SourceMap? = null
+
+    /** Load address of the user .so in the inferior. Discovered from
+     *  qXfer:libraries-svr4:read after the initial stop. Breakpoint
+     *  addresses are `dwarfAddress + userLibraryBase`. */
+    private var userLibraryBase: Long = 0L
+
+    /** Absolute path the current debug session loaded as the user binary.
+     *  Used to match the right svr4 library entry. */
+    private var currentUserLibraryPath: String? = null
 
     private val _output = MutableSharedFlow<String>(
         replay = 0,
@@ -139,6 +158,12 @@ class LldbDebuggerService(
                 check(userLibrary.exists()) {
                     "user library missing at ${userLibrary.absolutePath}"
                 }
+                currentUserLibraryPath = userLibrary.absolutePath
+
+                // Parse DWARF line info up-front so breakpoints can be
+                // resolved the moment we know the load address.
+                sourceMap = SourceMap.fromElf(userLibrary)
+                Log.i(TAG, "sourceMap rows=${sourceMap?.rowCount ?: 0}")
 
                 // Reap any orphaned lldb-server from a previous session
                 // before we try to bind a new listen port. Without this,
@@ -191,7 +216,12 @@ class LldbDebuggerService(
                 val sock = connectWithRetry("127.0.0.1", port, timeoutMs = 5000)
                     ?: error("could not connect to 127.0.0.1:$port within 5s")
                 sock.tcpNoDelay = true
-                sock.soTimeout = 5000
+                // NOTE: soTimeout intentionally NOT set. The reader coroutine
+                // blocks on stream.read() indefinitely while the target is
+                // stopped and the user is thinking — a finite timeout here
+                // caused the reader to die after ~5s of idle, closing the
+                // reply channel and turning every subsequent command into a
+                // "Channel was closed" error.
                 socket = sock
                 input = sock.getInputStream()
                 output2 = sock.getOutputStream()
@@ -240,6 +270,20 @@ class LldbDebuggerService(
                     val initial = channel.receive()
                     sendAck()
                     applyStopReply(initial)
+
+                    // 4d. Fetch the loaded-library list so we know where
+                    // libuser-debug.so was mapped. Required for
+                    // breakpoint address resolution (DWARF addr + base).
+                    //
+                    // BUT — at this point the target is stopped inside
+                    // ld-android.so BEFORE it has dlopen'd our user .so.
+                    // The library list will only contain the trampoline
+                    // itself. That's fine for Phase 2: we re-fetch the
+                    // library list after each stop to catch the user .so
+                    // when it appears (usually right after the trampoline
+                    // reaches its dlopen call).
+                    refreshLibraryList()
+                    applyPendingBreakpoints()
                 }
 
                 Result.success(Unit)
@@ -261,25 +305,119 @@ class LldbDebuggerService(
             }.getOrThrow()
         }
 
+    override suspend fun toggleBreakpoint(file: String, line: Int) = withContext(dispatchers.io) {
+        val basename = file.substringAfterLast('/').substringAfterLast('\\')
+        val key = SourceBreakpoint(basename, line)
+        val current = _breakpoints.value
+        if (key in current) {
+            // Remove. If live, send $z1.
+            val existing = current[key]!!
+            if (state.value.isActive && existing.runtimeAddress != null) {
+                runCatching {
+                    cmdMutex.withLock {
+                        writePacket("z1,${existing.runtimeAddress.toString(16)},4")
+                        val reply = replyChannel?.receive() ?: return@withLock
+                        sendAck()
+                        if (reply != "OK") Log.w(TAG, "z1 rejected: $reply")
+                    }
+                }
+            }
+            _breakpoints.value = current - key
+        } else {
+            val entry = BreakpointState(key)
+            _breakpoints.value = current + (key to entry)
+            // If a session is live AND we know the load base, resolve now.
+            if (state.value.isActive && userLibraryBase != 0L) {
+                applySingleBreakpoint(key)
+            }
+        }
+    }
+
+    override suspend fun clearBreakpoints() = withContext(dispatchers.io) {
+        val live = _breakpoints.value.values.filter { it.runtimeAddress != null }
+        if (state.value.isActive && live.isNotEmpty()) {
+            runCatching {
+                cmdMutex.withLock {
+                    for (bp in live) {
+                        writePacket("z1,${bp.runtimeAddress!!.toString(16)},4")
+                        replyChannel?.receive()
+                        sendAck()
+                    }
+                }
+            }
+        }
+        _breakpoints.value = emptyMap()
+    }
+
     override suspend fun stepInstruction() = withContext(dispatchers.io) {
         checkStopped("stepInstruction")
-        cmdMutex.withLock {
-            _state.value = DebuggerState.Running(currentPid())
-            writePacket("vCont;s")
-            val reply = replyChannel!!.receive()
-            sendAck()
-            applyStopReply(reply)
-        }
+        runResumeCommand(resumePacket = "vCont;s", thenContinue = false)
     }
 
     override suspend fun cont() = withContext(dispatchers.io) {
         checkStopped("cont")
-        cmdMutex.withLock {
-            _state.value = DebuggerState.Running(currentPid())
-            writePacket("vCont;c")
-            val reply = replyChannel!!.receive()
-            sendAck()
-            applyStopReply(reply)
+        runResumeCommand(resumePacket = "vCont;c", thenContinue = false)
+    }
+
+    /**
+     * Resume execution. With hardware breakpoints (Z1) there is NO need
+     * for a lift/step/re-insert dance — HW breakpoints live in arm64
+     * debug registers, not in target memory, so the instruction at the
+     * breakpoint PC is pristine and a plain `vCont;c` will re-execute
+     * it and the breakpoint will fire again on the next iteration.
+     * That's exactly what a for-loop breakpoint needs.
+     *
+     * We used to do the software-breakpoint dance here (z0/vCont;s/Z0),
+     * but the Z0 re-insert reliably hung lldb-server for tens of
+     * seconds after a trace stop — a known class of RSP framing issue
+     * on the client side. Switching to Z1 sidesteps it entirely and
+     * matches what LLVM's own research (up to 16 HW breakpoint slots
+     * exposed via PTRACE_SETREGSET + NT_ARM_HW_BREAK) says should work.
+     */
+    private suspend fun runResumeCommand(resumePacket: String, thenContinue: Boolean) {
+        try {
+            cmdMutex.withLock {
+                _state.value = DebuggerState.Running(currentPid())
+                writePacket(resumePacket)
+                val reply = replyChannel?.receiveSafe() ?: return@withLock
+                sendAck()
+                applyStopReply(reply)
+            }
+        } catch (_: ClosedReceiveChannelException) {
+            // Session went away under us (stop() or onCleared). Not an
+            // error; cleanup has already happened or is in flight.
+            Log.i(TAG, "resume command: channel closed, session ended")
+        }
+        onStoppedAfterCommand()
+    }
+
+    /** Non-throwing channel receive. Returns null if the channel is
+     *  closed (cleanup raced with us) so we bail out gracefully. */
+    private suspend fun Channel<String>?.receiveSafe(): String? {
+        if (this == null) return null
+        return try { receive() } catch (_: ClosedReceiveChannelException) { null }
+    }
+
+    /**
+     * Hook run after cont/step returns. If the new state is Stopped, we:
+     *  1. Refresh the svr4 library list so any newly-loaded .so (e.g. the
+     *     user's lib after the trampoline dlopens it) becomes visible.
+     *  2. Retry resolution of any unverified breakpoints.
+     *
+     * This is what lets a breakpoint set before `start()` actually fire —
+     * it gets applied when we hit the trampoline's SIGTRAP sync point.
+     */
+    private suspend fun onStoppedAfterCommand() {
+        if (_state.value !is DebuggerState.Stopped) return
+        if (_breakpoints.value.none { !it.value.verified }) return
+        // Takes cmdMutex internally via the write sequence.
+        try {
+            cmdMutex.withLock {
+                refreshLibraryList()
+            }
+            applyPendingBreakpoints()
+        } catch (t: Throwable) {
+            Log.w(TAG, "onStoppedAfterCommand failed", t)
         }
     }
 
@@ -304,14 +442,28 @@ class LldbDebuggerService(
     }
 
     override suspend fun stop() = withContext(dispatchers.io) {
-        if (_state.value == DebuggerState.Idle) return@withContext
-        Log.i(TAG, "stop() called")
+        val current = _state.value
+        if (current == DebuggerState.Idle ||
+            current is DebuggerState.Exited ||
+            current is DebuggerState.Failed) {
+            // Nothing to kill — but still run cleanup to free any dangling
+            // socket/process handles that the exit path may have missed.
+            cleanup()
+            if (current !is DebuggerState.Failed) {
+                _state.value = DebuggerState.Idle
+            }
+            return@withContext
+        }
+        Log.i(TAG, "stop() called in state=$current")
         // Best-effort $k (kill). Don't wait — we're about to close
         // everything anyway.
-        runCatching {
-            synchronized(output2 ?: return@runCatching) {
-                output2!!.write("\$k#6b".toByteArray(Charsets.US_ASCII))
-                output2!!.flush()
+        val out = output2
+        if (out != null) {
+            runCatching {
+                synchronized(out) {
+                    out.write("\$k#6b".toByteArray(Charsets.US_ASCII))
+                    out.flush()
+                }
             }
         }
         cleanup()
@@ -464,7 +616,7 @@ class LldbDebuggerService(
                 val sig = body.substring(1, 3).toIntOrNull(16) ?: 0
                 val kv = parseKeyValues(body.substring(3))
                 val reasonStr = kv["reason"] ?: ""
-                val reason = when (reasonStr) {
+                var reason = when (reasonStr) {
                     "breakpoint" -> StopReason.BREAKPOINT
                     "trace" -> StopReason.TRACE
                     "trap" -> StopReason.TRAP
@@ -476,17 +628,60 @@ class LldbDebuggerService(
                 // PC at arm64 register index 0x20. Parsed as little-endian hex.
                 val pc = kv["20"]?.let { parseHexLE(it) } ?: 0L
                 val tid = kv["thread"] ?: ""
-                Log.i(TAG, "stopped reason=$reasonStr sig=$sig pc=0x${pc.toString(16)} tid=$tid")
+
+                // lldb-server reports "signal" for our Z0 breakpoint hits
+                // (sig=5 = SIGTRAP), not "breakpoint", because the swbreak
+                // stop-reason capability wasn't negotiated. Detect by PC
+                // matching any of our set breakpoints and rewrite the
+                // reason so cont/step know to do the step-over dance and
+                // the UI shows "breakpoint" instead of "signal".
+                if (reason == StopReason.SIGNAL && sig == 5) {
+                    if (_breakpoints.value.values.any {
+                            it.runtimeAddress != null && it.runtimeAddress == pc
+                        }) {
+                        reason = StopReason.BREAKPOINT
+                    }
+                }
+
+                // Best-effort source lookup: PC → (file, line) via DWARF.
+                // The PC in the T packet is a RUNTIME address; we need to
+                // subtract userLibraryBase to get a DWARF-relative address
+                // before querying the map.
+                val (srcFile, srcLine) = resolvePcToSource(pc)
+
+                Log.i(TAG, "stopped reason=$reasonStr sig=$sig pc=0x${pc.toString(16)} " +
+                    "tid=$tid src=${srcFile?.let { "$it:$srcLine" } ?: "(unknown)"}")
                 _state.value = DebuggerState.Stopped(
                     pid = currentPid(),
                     pc = pc,
                     reason = reason,
                     signal = sig,
                     threadId = tid,
+                    sourceFile = srcFile,
+                    sourceLine = srcLine,
                 )
             }
             else -> Log.w(TAG, "applyStopReply: unrecognised '${body.take(20)}'")
         }
+    }
+
+    /**
+     * Translate a runtime PC to a source file + line via the DWARF line
+     * map for the user library. Returns `(null, null)` if:
+     *  - sourceMap hasn't been built yet (pre-handshake)
+     *  - userLibraryBase isn't known (pre-dlopen)
+     *  - PC is outside the user .so's address range
+     *  - DWARF has no row for that address (PC is in libc, ld, etc.)
+     */
+    private fun resolvePcToSource(pc: Long): Pair<String?, Int?> {
+        val map = sourceMap ?: return null to null
+        val base = userLibraryBase
+        if (base == 0L) return null to null
+        // Subtract load base so we query with DWARF-relative addresses.
+        val dwarfAddr = pc - base
+        if (dwarfAddr < 0) return null to null
+        val loc = map.findLocation(dwarfAddr) ?: return null to null
+        return loc.file to loc.line
     }
 
     /** Parse a `key:value;key:value;` tail from a T packet. */
@@ -605,6 +800,140 @@ class LldbDebuggerService(
         if (killed.isNotEmpty()) Thread.sleep(100)  // let ports free
     }
 
+    /**
+     * Fetch `qXfer:libraries-svr4:read:` in chunks and extract the
+     * runtime load address of [currentUserLibraryPath]. Must be called
+     * with [cmdMutex] held (we already are inside the handshake block).
+     *
+     * The response is XML that looks like:
+     *
+     *   <library-list-svr4 version="1.0" main-lm="0x...">
+     *     <library name="/path/to/libfoo.so" lm="0x..." l_addr="0x1234"
+     *              l_ld="0x..."/>
+     *     ...
+     *   </library-list-svr4>
+     *
+     * We read until we see `l`-prefixed last-chunk marker and regex-extract
+     * the entry whose name matches. Crude by design — this is a tight
+     * Phase 2 MVP; if it ever matters we can replace with a real XML
+     * pull parser.
+     */
+    private suspend fun refreshLibraryList() {
+        val channel = replyChannel ?: return
+        val target = currentUserLibraryPath ?: return
+        val xml = StringBuilder()
+        var offset = 0
+        val chunkSize = 0x1000
+        while (true) {
+            writePacket("qXfer:libraries-svr4:read::${offset.toString(16)},${chunkSize.toString(16)}")
+            val reply = channel.receive()
+            sendAck()
+            if (reply.isEmpty()) break
+            val marker = reply[0]
+            val body = reply.substring(1)
+            xml.append(body)
+            if (marker == 'l') break      // last chunk
+            if (marker != 'm') break       // unexpected
+            offset += body.length
+            if (body.isEmpty()) break
+        }
+        val doc = xml.toString()
+        Log.i(TAG, "libraries-svr4: ${doc.length} chars")
+
+        // Find <library ...> entries whose `name=` attribute matches our
+        // user library (full path or basename).
+        val targetBasename = target.substringAfterLast('/')
+        val libTagRegex = Regex("""<library\s+[^>]*>""")
+        val nameRegex = Regex("""name="([^"]+)"""")
+        val lAddrRegex = Regex("""l_addr="(0x[0-9a-fA-F]+|[0-9]+)"""")
+
+        for (match in libTagRegex.findAll(doc)) {
+            val tag = match.value
+            val name = nameRegex.find(tag)?.groupValues?.get(1) ?: continue
+            val nameBasename = name.substringAfterLast('/')
+            if (name == target || nameBasename == targetBasename) {
+                val raw = lAddrRegex.find(tag)?.groupValues?.get(1) ?: continue
+                userLibraryBase = if (raw.startsWith("0x") || raw.startsWith("0X")) {
+                    raw.substring(2).toLong(16)
+                } else {
+                    raw.toLong()
+                }
+                Log.i(TAG, "userLibraryBase=0x${userLibraryBase.toString(16)} ($name)")
+                return
+            }
+        }
+        Log.w(TAG, "user library $targetBasename not in svr4 list yet")
+    }
+
+    /** Iterate pending (unresolved) breakpoints and try to set them. */
+    private suspend fun applyPendingBreakpoints() {
+        val map = _breakpoints.value
+        if (map.isEmpty()) return
+        for (entry in map.values) {
+            if (!entry.verified) applySingleBreakpoint(entry.source)
+        }
+    }
+
+    /**
+     * Resolve one source breakpoint to a runtime address and send
+     * `$Z0,addr,4`. Updates state flow with the verified address on
+     * success, or leaves it unverified on failure.
+     *
+     * Expects the caller to NOT hold [cmdMutex] — this takes it itself.
+     */
+    private suspend fun applySingleBreakpoint(key: SourceBreakpoint) {
+        val map = sourceMap ?: run {
+            Log.w(TAG, "applyBreakpoint: no sourceMap")
+            return
+        }
+        val base = userLibraryBase
+        if (base == 0L) {
+            Log.w(TAG, "applyBreakpoint: userLibraryBase unknown yet")
+            return
+        }
+        val dwarfAddr = map.findAddress(key.fileBasename, key.line) ?: run {
+            Log.w(TAG, "applyBreakpoint: ${key.fileBasename}:${key.line} not in debug info")
+            return
+        }
+        val runtimeAddr = dwarfAddr + base
+        Log.i(TAG, "applyBreakpoint: ${key.fileBasename}:${key.line} " +
+            "dwarf=0x${dwarfAddr.toString(16)} runtime=0x${runtimeAddr.toString(16)}")
+
+        val channel = replyChannel ?: return
+        try {
+            cmdMutex.withLock {
+                // Z1 = hardware breakpoint. arm64's up to 16 BVR/BCR
+                // slots are plenty for hand-set source breakpoints and
+                // the HW path needs no lift/step/re-insert dance on hit.
+                writePacket("Z1,${runtimeAddr.toString(16)},4")
+                val reply = channel.receive()
+                sendAck()
+                if (reply == "OK") {
+                    _breakpoints.update { cur ->
+                        val existing = cur[key] ?: return@update cur
+                        cur + (key to existing.copy(
+                            runtimeAddress = runtimeAddr,
+                            verified = true,
+                        ))
+                    }
+                    Log.i(TAG, "breakpoint set: ${key.fileBasename}:${key.line}")
+                } else {
+                    Log.w(TAG, "Z1 rejected: $reply")
+                }
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "applyBreakpoint write failed", t)
+        }
+    }
+
+    /**
+     * Idempotent teardown. Safe to call multiple times and from either
+     * the reader thread (on target exit) or the stop() path (on user
+     * action). Everything is nulled out, sockets closed, subprocess
+     * killed, coroutine scope cancelled. Breakpoints ARE preserved —
+     * the user's red dots should survive a stop/start cycle.
+     */
+    @Synchronized
     private fun cleanup() {
         try { socket?.close() } catch (_: Throwable) {}
         try { process?.destroyForcibly() } catch (_: Throwable) {}
@@ -618,6 +947,15 @@ class LldbDebuggerService(
             scope.coroutineContext[Job]?.cancel()
         }
         sessionScope = null
+        sourceMap = null
+        userLibraryBase = 0L
+        currentUserLibraryPath = null
+        // Mark user breakpoints as unverified so next session re-resolves
+        // them against fresh load addresses. Don't clear them — that's the
+        // user's data, they should survive session boundaries.
+        _breakpoints.update { cur ->
+            cur.mapValues { (_, bp) -> bp.copy(runtimeAddress = null, verified = false) }
+        }
     }
 
     companion object {

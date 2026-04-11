@@ -26,7 +26,7 @@ fun WelcomeRoute(
     core: Core,
     onOpenProject: (RecentProject) -> Unit,
     onCreateNew: () -> Unit,
-    onOpenFolder: () -> Unit,
+    onChat: () -> Unit,
     onSettings: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
@@ -51,7 +51,7 @@ fun WelcomeRoute(
             }
         },
         onCreateNew = onCreateNew,
-        onOpenFolder = onOpenFolder,
+        onChat = onChat,
         onSettings = onSettings,
         onRunDebugSpike = {
             spikeOutput = "Running platform probe…"
