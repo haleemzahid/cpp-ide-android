@@ -36,9 +36,15 @@ android {
         //   exercisesApiUrl=https://your-host.example.com
         // to local.properties; defaults to the deployed Dokploy
         // instance so a fresh checkout Just Works.
+        //
+        // NOTE: plain http until we move off *.traefik.me. Android's
+        // network-security-config allows cleartext for the traefik.me
+        // domain only; when we switch to a real domain with a valid
+        // Let's Encrypt cert, flip this back to https and delete the
+        // traefik.me exception in res/xml/network_security_config.xml.
         val exercisesApiUrl: String =
             localProps.getProperty("exercisesApiUrl")
-                ?: "https://cpp-apis-1cvyqe-eb5bd1-204-168-128-241.traefik.me"
+                ?: "http://cpp-apis-1cvyqe-eb5bd1-204-168-128-241.traefik.me"
         buildConfigField(
             "String",
             "EXERCISES_API_URL",

@@ -2,7 +2,6 @@ package dev.cppide.ide.screens.welcome
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -15,25 +14,19 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Chat
-import androidx.compose.material.icons.outlined.Add
-import androidx.compose.material.icons.outlined.BugReport
 import androidx.compose.material.icons.outlined.FolderOpen
+import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.School
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.Icon
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import dev.cppide.core.session.RecentProject
 import dev.cppide.ide.components.CaptionText
 import dev.cppide.ide.components.CppButton
@@ -54,11 +47,10 @@ fun WelcomeScreen(
     onOpenProject: (RecentProject) -> Unit,
     onTogglePin: (RecentProject) -> Unit,
     onCreateNew: () -> Unit,
+    onOpenExercises: () -> Unit,
+    onAbout: () -> Unit,
     onChat: () -> Unit,
     onSettings: () -> Unit,
-    onRunDebugSpike: () -> Unit,
-    onRunGdbserverSpike: () -> Unit,
-    debugSpikeOutput: String?,
     modifier: Modifier = Modifier,
 ) {
     val colors = CppIde.colors
@@ -73,6 +65,12 @@ fun WelcomeScreen(
             title = "C++ IDE",
             trailing = {
                 Row {
+                    // Order matches user request: About → Chat → Settings.
+                    CppIconButton(
+                        icon = Icons.Outlined.Info,
+                        contentDescription = "About",
+                        onClick = onAbout,
+                    )
                     CppIconButton(
                         icon = Icons.AutoMirrored.Outlined.Chat,
                         contentDescription = "Chat with AI",
@@ -128,47 +126,13 @@ fun WelcomeScreen(
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
-
-            // ---- TEMPORARY: debugger spike trigger ----
-            // Throwaway UI to run the lldb-server reachability spike.
-            // Remove once we commit to a debugger design.
-            item { Spacer(Modifier.height(dimens.spacingM)) }
-            item { SectionText("Debug spike (temporary)") }
             item {
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(dimens.spacingM),
+                CppButton(
+                    text = "Browse exercises",
+                    onClick = onOpenExercises,
+                    style = CppButtonStyle.Secondary,
                     modifier = Modifier.fillMaxWidth(),
-                ) {
-                    CppButton(
-                        text = "Platform probe",
-                        onClick = onRunDebugSpike,
-                        style = CppButtonStyle.Secondary,
-                        modifier = Modifier.weight(1f),
-                    )
-                    CppButton(
-                        text = "Gdbserver probe",
-                        onClick = onRunGdbserverSpike,
-                        style = CppButtonStyle.Secondary,
-                        modifier = Modifier.weight(1f),
-                    )
-                }
-            }
-            if (debugSpikeOutput != null) {
-                item {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(colors.surfaceElevated)
-                            .padding(dimens.spacingM),
-                    ) {
-                        Text(
-                            text = debugSpikeOutput,
-                            color = colors.textPrimary,
-                            fontSize = 11.sp,
-                            fontFamily = FontFamily.Monospace,
-                        )
-                    }
-                }
+                )
             }
         }
     }

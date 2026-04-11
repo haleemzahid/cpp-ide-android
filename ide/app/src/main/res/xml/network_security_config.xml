@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Network security config. The whole app is HTTPS-by-default — plain
+  HTTP is only permitted for the specific Traefik preview subdomains
+  we use while Dokploy is misconfigured. Scoped as narrowly as we can
+  so we don't accidentally relax TLS for the rest of the app.
+
+  When we move to a real domain (e.g. cpp-api.dawlify.com) with a
+  valid Let's Encrypt cert, delete the entire <domain-config> block —
+  HTTPS will work out of the box since Android 7+ trusts Let's Encrypt.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <!-- Exercises API over plain HTTP while we're on *.traefik.me.
+         `includeSubdomains=true` means any subdomain of traefik.me
+         matches — Traefik preview hosts vary per deploy. -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">traefik.me</domain>
+    </domain-config>
+</network-security-config>

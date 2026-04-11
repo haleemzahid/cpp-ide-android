@@ -21,6 +21,7 @@ import dev.cppide.core.session.RecentProject
 import dev.cppide.ide.screens.about.AboutRoute
 import dev.cppide.ide.screens.chat.ChatRoute
 import dev.cppide.ide.screens.editor.EditorRoute
+import dev.cppide.ide.screens.exercises.ExercisesRoute
 import dev.cppide.ide.screens.settings.SettingsRoute
 import dev.cppide.ide.screens.welcome.NewProjectDialog
 import dev.cppide.ide.screens.welcome.WelcomeRoute
@@ -78,6 +79,7 @@ private sealed interface Destination {
     data object Settings : Destination
     data object Chat : Destination
     data object About : Destination
+    data object Exercises : Destination
 }
 
 @Composable
@@ -95,6 +97,8 @@ private fun AppNavigation(core: Core) {
                     destination = Destination.Editor(project)
                 },
                 onCreateNew = { showNewProject = true },
+                onOpenExercises = { destination = Destination.Exercises },
+                onAbout = { destination = Destination.About },
                 onChat = { destination = Destination.Chat },
                 onSettings = { destination = Destination.Settings },
             )
@@ -110,7 +114,6 @@ private fun AppNavigation(core: Core) {
             SettingsRoute(
                 core = core,
                 onBack = { destination = Destination.Welcome },
-                onOpenAbout = { destination = Destination.About },
             )
         }
         Destination.Chat -> {
@@ -122,7 +125,16 @@ private fun AppNavigation(core: Core) {
         }
         Destination.About -> {
             AboutRoute(
-                onBack = { destination = Destination.Settings },
+                onBack = { destination = Destination.Welcome },
+            )
+        }
+        Destination.Exercises -> {
+            ExercisesRoute(
+                core = core,
+                onBack = { destination = Destination.Welcome },
+                onOpenProject = { project ->
+                    destination = Destination.Editor(project)
+                },
             )
         }
     }

@@ -17,7 +17,6 @@ import dev.cppide.core.Core
 fun SettingsRoute(
     core: Core,
     onBack: () -> Unit,
-    onOpenAbout: () -> Unit,
 ) {
     val appContext = LocalContext.current.applicationContext
     val viewModel = remember(core) { SettingsViewModel(core = core, appContext = appContext) }
@@ -27,6 +26,5 @@ fun SettingsRoute(
         state = state,
         onIntent = viewModel::onIntent,
         onBack = onBack,
-        onOpenAbout = onOpenAbout,
     )
 }
