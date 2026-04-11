@@ -189,7 +189,9 @@ class TermuxToolchain(
 
         // Bumped when the termux.zip schema changes so old extractions wipe automatically.
         // v3: added liblzma.so.5 for lldb-server.
-        private const val MARKER_VERSION = 3
+        // v4: libLLVM.so deduped out of termux.zip (now lives only in jniLibs/);
+        //     sanitizer archives trimmed to builtins + asan + ubsan.
+        private const val MARKER_VERSION = 4
         private const val CLANG_RESOURCE_VERSION = "21"
 
         private val CLANG_ALIASES = listOf(

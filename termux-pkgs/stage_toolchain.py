@@ -105,8 +105,18 @@ def stage_assets_zip():
     with open(os.path.join(HERE, "closure_manifest.json")) as f:
         manifest = json.load(f)
 
-    # Already-shipped-in-jniLibs (as clean names) — skip in zip
-    already_in_jnilibs = {"libc++_shared.so"}  # only one whose soname matches jniLibs entry
+    # Already-shipped-in-jniLibs (as clean names) — skip in zip so the APK
+    # doesn't ship duplicate copies. Every soname listed here has a matching
+    # entry in stage_jnilibs() above that places the same file as a clean
+    # lib*.so under jniLibs/arm64-v8a/, where it's loaded via the default
+    # linker namespace.
+    #
+    # libLLVM.so is the big one: ~40 MB compressed. Before this dedup it was
+    # being shipped twice (inside termux.zip AND as jniLibs/libLLVM.so).
+    already_in_jnilibs = {
+        "libc++_shared.so",
+        "libLLVM.so",
+    }
 
     entries = []
 
@@ -154,6 +164,40 @@ def stage_assets_zip():
                     entries.append((src, f"sysroot/{rel.replace(os.sep, '/')}"))
 
     # 3) Clang builtin headers + runtime archives (lib/clang/21)
+    #
+    # The compiler-rt package ships a full suite of sanitizer archives, most
+    # of which the IDE never exposes. Keep only:
+    #   - builtins  (MANDATORY — softfloat, divmod, sync primitives, etc.)
+    #   - asan      (+cxx/static/preinit helpers — used for "Debug with asan")
+    #   - ubsan     (minimal + standalone + cxx — catches UB for students)
+    #
+    # Drop: hwasan, tsan, fuzzer, lsan, profile (PGO), stats, stats_client,
+    # orc_rt. Each is 1-6 MB raw; together they're ~5 MB compressed in the
+    # APK with no runtime benefit for this tool.
+    #
+    # Anything under lib/clang/21/include/ (intrinsic headers like stdarg.h,
+    # arm_neon.h) is required and always kept.
+    KEPT_SAN_PREFIXES = (
+        "libclang_rt.builtins",
+        "libclang_rt.asan",
+        "libclang_rt.ubsan_minimal",
+        "libclang_rt.ubsan_standalone",
+    )
+
+    def should_ship_clang_file(rel_path: str) -> bool:
+        # rel_path looks like "lib/clang/21/lib/linux/libclang_rt.tsan-...a"
+        # or                   "lib/clang/21/include/stdarg.h"
+        if "/lib/linux/" not in rel_path.replace(os.sep, "/"):
+            return True  # intrinsic headers etc.
+        basename = os.path.basename(rel_path)
+        # orc_rt is the JIT runtime, unused here
+        if basename.startswith("liborc_rt"):
+            return False
+        # compiler_rt archives all start with libclang_rt.
+        if basename.startswith("libclang_rt."):
+            return any(basename.startswith(p) for p in KEPT_SAN_PREFIXES)
+        return True
+
     for pkg, subdir in [("clang", "lib/clang"), ("libcompiler-rt", "lib/clang")]:
         root = termux_path(pkg, subdir)
         if not os.path.exists(root):
@@ -164,7 +208,10 @@ def stage_assets_zip():
                 if os.path.islink(src):
                     continue
                 rel = os.path.relpath(src, termux_path(pkg))
-                entries.append((src, f"{rel.replace(os.sep, '/')}"))
+                rel_norm = rel.replace(os.sep, "/")
+                if not should_ship_clang_file(rel_norm):
+                    continue
+                entries.append((src, rel_norm))
 
     # Dedup by arcname (libcompiler-rt overlaps clang's lib/clang/21/include)
     seen = {}
