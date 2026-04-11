@@ -21,6 +21,9 @@ android {
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
+        // Drop non-English string resources pulled in by androidx/material3/
+        // compose — saves ~1-2MB of per-locale .xml from transitive deps.
+        resourceConfigurations += listOf("en")
     }
 
     buildTypes {
@@ -29,7 +32,12 @@ android {
             isJniDebuggable = true
         }
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
             // Sign release builds with the debug keystore so `installRelease`
             // works on a plugged-in device without a production keystore.
             // Replace with a proper signingConfigs block when shipping.
