@@ -17,16 +17,12 @@ import kotlinx.coroutines.launch
 import java.io.File
 
 /**
- * Owns the exercises catalog state. On init, fetches every category
- * from the API AND downloads each one's full payload so the flat row
- * list can show exercise titles (not just categories) without a
- * per-tap round-trip. Tradeoff: first open is slower if there are
- * many categories, but the list screen is then fully offline.
- *
- * When the user taps download, we materialise the entire CATEGORY the
- * exercise belongs to as a local project — that matches the UX
- * Shahid confirmed: one category = one project on disk, each exercise
- * as a subfolder.
+ * Owns the exercises catalog state. Lists categories via `/categories`
+ * (lightweight) and downloads a whole category at a time via
+ * `/categories/:slug/download`. No per-exercise tap pattern — one
+ * category = one "Download all" button = one on-disk project with
+ * every exercise materialised as a subfolder, matching the curriculum
+ * workflow Shahid described.
  */
 class ExercisesViewModel(
     private val core: Core,
@@ -47,76 +43,41 @@ class ExercisesViewModel(
     fun refresh() {
         viewModelScope.launch {
             _state.update { it.copy(loading = true, errorMessage = null) }
-
-            val catsResult = core.exercisesApi.listCategories()
-            catsResult.onFailure { t ->
-                _state.update {
-                    it.copy(loading = false, errorMessage = "fetch: ${t.message}")
+            core.exercisesApi.listCategories()
+                .onSuccess { categories ->
+                    _state.update {
+                        it.copy(
+                            loading = false,
+                            categories = categories.sortedWith(
+                                compareBy({ it.orderIndex }, { it.title }),
+                            ),
+                        )
+                    }
                 }
-                return@launch
-            }
-
-            val categories = catsResult.getOrNull().orEmpty()
-                .sortedWith(compareBy({ it.orderIndex }, { it.title }))
-
-            // Download the full payload for every category so we can
-            // show exercise titles without another round-trip when the
-            // user scrolls. If any category fails, we surface the
-            // error but keep the ones that succeeded.
-            val rows = mutableListOf<ExerciseRow>()
-            var firstError: String? = null
-            for (cat in categories) {
-                rows.add(ExerciseRow.Header(cat))
-                val full = core.exercisesApi.downloadCategory(cat.slug)
-                full.onSuccess { payload ->
-                    payload.exercises
-                        .sortedWith(compareBy({ it.orderIndex }, { it.title }))
-                        .forEach { ex ->
-                            rows.add(
-                                ExerciseRow.Item(
-                                    categorySlug = cat.slug,
-                                    categoryTitle = cat.title,
-                                    exerciseSlug = ex.slug,
-                                    exerciseTitle = ex.title,
-                                    orderIndex = ex.orderIndex,
-                                ),
-                            )
-                        }
-                }.onFailure { t ->
-                    if (firstError == null) firstError = "${cat.title}: ${t.message}"
+                .onFailure { t ->
+                    _state.update {
+                        it.copy(loading = false, errorMessage = t.message)
+                    }
                 }
-            }
-
-            _state.update {
-                it.copy(
-                    loading = false,
-                    rows = rows,
-                    errorMessage = firstError,
-                )
-            }
         }
     }
 
     /**
-     * Downloads the whole category containing [categorySlug] and
-     * materialises it on disk as:
+     * Download every exercise in [categorySlug] and materialise the
+     * whole set on disk:
      *
      *   projects/<categorySlug>/<exerciseSlug>/README.md
      *   projects/<categorySlug>/<exerciseSlug>/solution.cpp
      *
-     * An empty `solution.cpp` is created so clangd has something to
-     * attach to the moment the student opens the exercise folder.
-     * After writing the tree, emits an [openProject] event so the
-     * route can navigate into the editor.
-     *
-     * [exerciseSlug] is only used to pin the per-row spinner — the
-     * whole category is downloaded in one request regardless.
+     * An empty `solution.cpp` is created next to each README so clangd
+     * has something to attach to immediately. After writing the tree,
+     * emits an [openProject] event so the route can navigate into the
+     * editor with the whole category as a single multi-folder project.
      */
-    fun download(categorySlug: String, exerciseSlug: String) {
-        val key = ExercisesState.key(categorySlug, exerciseSlug)
+    fun downloadCategory(categorySlug: String) {
         viewModelScope.launch {
             _state.update { s ->
-                s.copy(statusByKey = s.statusByKey + (key to DownloadStatus.Downloading))
+                s.copy(statusBySlug = s.statusBySlug + (categorySlug to DownloadStatus.Downloading))
             }
             val result = core.exercisesApi.downloadCategory(categorySlug)
             result.onSuccess { payload ->
@@ -124,24 +85,28 @@ class ExercisesViewModel(
                     .getOrElse { t ->
                         _state.update { s ->
                             s.copy(
-                                statusByKey = s.statusByKey + (key to DownloadStatus.Failed),
+                                statusBySlug = s.statusBySlug + (categorySlug to DownloadStatus.Failed),
                                 errorMessage = "write: ${t.message}",
                             )
                         }
                         return@launch
                     }
+                // Touch the recents list so the project appears on the
+                // welcome screen, but do NOT auto-navigate — the user
+                // wants to stay on the catalog so they can queue up
+                // more downloads. The "Downloaded — tap to open" state
+                // on the card lets them jump in when they're ready.
                 core.sessionRepository.touch(
                     project.root.absolutePath,
                     project.name,
                 )
                 _state.update { s ->
-                    s.copy(statusByKey = s.statusByKey + (key to DownloadStatus.Done))
+                    s.copy(statusBySlug = s.statusBySlug + (categorySlug to DownloadStatus.Done))
                 }
-                _openProject.tryEmit(project)
             }.onFailure { t ->
                 _state.update { s ->
                     s.copy(
-                        statusByKey = s.statusByKey + (key to DownloadStatus.Failed),
+                        statusBySlug = s.statusBySlug + (categorySlug to DownloadStatus.Failed),
                         errorMessage = "download: ${t.message}",
                     )
                 }
@@ -150,9 +115,35 @@ class ExercisesViewModel(
     }
 
     /**
+     * Open an already-downloaded category in the editor. Called when
+     * the user taps the "Downloaded — tap to open" state on a card.
+     * Looks up the on-disk folder and emits an [openProject] event
+     * without re-hitting the network.
+     */
+    fun openDownloaded(categorySlug: String) {
+        val projectsRoot = File(core.context.filesDir, "projects")
+        val categoryDir = File(projectsRoot, sanitise(categorySlug))
+        if (!categoryDir.exists()) {
+            _state.update { it.copy(errorMessage = "project not found on disk") }
+            return
+        }
+        val title = _state.value.categories
+            .firstOrNull { it.slug == categorySlug }?.title
+            ?: categoryDir.name
+        _openProject.tryEmit(
+            Project(
+                name = title,
+                root = categoryDir.canonicalFile,
+                lastOpenedAt = System.currentTimeMillis(),
+            ),
+        )
+    }
+
+    /**
      * Writes a downloaded category payload to app-private storage.
-     * Overwrites existing files if the student re-downloads but never
-     * clobbers a non-empty `solution.cpp` — that would wipe their work.
+     * Overwrites README.md on re-download (teacher edits must reach
+     * students) but never clobbers a non-empty `solution.cpp` — that
+     * would wipe in-progress student work.
      */
     private fun writeCategoryToDisk(payload: ExerciseCategoryDownload): Project {
         val projectsRoot = File(core.context.filesDir, "projects")
@@ -163,12 +154,8 @@ class ExercisesViewModel(
             val exerciseDir = File(categoryDir, sanitise(exercise.slug))
             exerciseDir.mkdirs()
 
-            // README.md always gets replaced — prompt edits from the
-            // teacher must reach the student on re-download.
             File(exerciseDir, "README.md").writeText(exercise.promptMd)
 
-            // solution.cpp is created ONLY if missing or empty, so a
-            // re-download doesn't nuke in-progress student work.
             val solution = File(exerciseDir, "solution.cpp")
             if (!solution.exists() || solution.length() == 0L) {
                 solution.writeText(defaultSolutionFor(exercise))
@@ -183,19 +170,22 @@ class ExercisesViewModel(
     }
 
     private fun defaultSolutionFor(exercise: Exercise): String {
-        // Keep the starter neutral — the student writes their own
-        // main() or whatever the prompt asks for. The shim still
-        // wraps this into a runnable binary via our existing build
-        // pipeline, so an empty main is a valid compile.
-        return """#include <iostream>
-
-            // ${exercise.title}
-            // See README.md for the task.
-
-            int main() {
-                return 0;
-            }
-        """.trimIndent()
+        // Starter template written to solution.cpp. Uses trimMargin + `|`
+        // so the indentation inside the string is independent of the
+        // surrounding Kotlin indentation — what you see here is exactly
+        // what lands on disk, with a trailing newline.
+        return """
+            |#include <iostream>
+            |using namespace std;
+            |
+            |// ${exercise.title}
+            |// See README.md for the task.
+            |
+            |int main() {
+            |    return 0;
+            |}
+            |
+        """.trimMargin()
     }
 
     private fun sanitise(name: String): String =

@@ -28,6 +28,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import dev.cppide.core.project.ProjectNode
 import dev.cppide.ide.components.BodyText
+import dev.cppide.ide.components.CaptionText
 import dev.cppide.ide.theme.CppIde
 
 /**
@@ -191,6 +192,22 @@ private fun DirectoryRow(
                 color = colors.textPrimary,
                 modifier = Modifier.weight(1f),
             )
+            // Child count badge — lets the student see at a glance
+            // which folders are non-empty (e.g. a category with 50
+            // exercise subfolders looks very different from one that
+            // was just created and is empty).
+            val visibleChildCount = node.children.count { child ->
+                when (child) {
+                    is ProjectNode.Directory -> true
+                    is ProjectNode.File -> child.isVisible()
+                }
+            }
+            if (visibleChildCount > 0) {
+                CaptionText(
+                    text = visibleChildCount.toString(),
+                    color = colors.textDisabled,
+                )
+            }
             RowActionIcon(
                 icon = Icons.Outlined.Add,
                 contentDescription = "Add file to ${node.name}",

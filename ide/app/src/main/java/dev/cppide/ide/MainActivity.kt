@@ -180,7 +180,7 @@ private fun RecentProject.toProject() = Project(
 private val STARTER_MAIN_CPP = """#include <iostream>
 using namespace std;
 
-int main(int argc, char** argv) {
+int main() {
     cout << "Hello, world!" << endl;
     return 0;
 }

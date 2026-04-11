@@ -46,6 +46,7 @@ fun WelcomeScreen(
     recents: List<RecentProject>,
     onOpenProject: (RecentProject) -> Unit,
     onTogglePin: (RecentProject) -> Unit,
+    onDeleteProject: (RecentProject) -> Unit,
     onCreateNew: () -> Unit,
     onOpenExercises: () -> Unit,
     onAbout: () -> Unit,
@@ -112,6 +113,7 @@ fun WelcomeScreen(
                         project = project,
                         onOpen = { onOpenProject(project) },
                         onTogglePin = { onTogglePin(project) },
+                        onDelete = { onDeleteProject(project) },
                     )
                 }
             }

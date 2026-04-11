@@ -29,6 +29,7 @@ fun ExercisesRoute(
     ExercisesScreen(
         state = state,
         onBack = onBack,
-        onDownload = viewModel::download,
+        onDownload = viewModel::downloadCategory,
+        onOpen = viewModel::openDownloaded,
     )
 }

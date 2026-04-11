@@ -2,6 +2,7 @@ package dev.cppide.ide.screens.exercises
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -25,6 +26,7 @@ import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.ErrorOutline
+import androidx.compose.material.icons.outlined.School
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
@@ -34,24 +36,27 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import dev.cppide.core.exercises.ExerciseCategory
 import dev.cppide.ide.components.BodyText
 import dev.cppide.ide.components.CaptionText
+import dev.cppide.ide.components.CppButton
+import dev.cppide.ide.components.CppButtonStyle
 import dev.cppide.ide.components.CppIconButton
 import dev.cppide.ide.components.CppTopBar
-import dev.cppide.ide.components.SectionText
 import dev.cppide.ide.theme.CppIde
 
 /**
- * Stateless exercises catalog. Shows every category header followed by
- * its exercises; each exercise row has a download button that becomes
- * a spinner while the category is downloading, a check when done, and
- * a red error circle on failure.
+ * Stateless exercises catalog. One card per category — the student
+ * taps "Download all" and the whole exercise set arrives as a single
+ * local project. Scales to 100+ exercises per category without making
+ * the student tap 100 times.
  */
 @Composable
 fun ExercisesScreen(
     state: ExercisesState,
     onBack: () -> Unit,
-    onDownload: (categorySlug: String, exerciseSlug: String) -> Unit,
+    onDownload: (categorySlug: String) -> Unit,
+    onOpen: (categorySlug: String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val colors = CppIde.colors
@@ -64,7 +69,7 @@ fun ExercisesScreen(
     ) {
         CppTopBar(
             title = "Exercises",
-            subtitle = "Download and start coding",
+            subtitle = "Pick a category",
             leading = {
                 CppIconButton(
                     icon = Icons.AutoMirrored.Outlined.ArrowBack,
@@ -79,9 +84,10 @@ fun ExercisesScreen(
             .calculateBottomPadding()
 
         when {
-            state.loading && state.rows.isEmpty() -> LoadingPane()
-            state.errorMessage != null && state.rows.isEmpty() -> ErrorPane(state.errorMessage)
-            state.rows.isEmpty() -> EmptyPane()
+            state.loading && state.categories.isEmpty() -> LoadingPane()
+            state.errorMessage != null && state.categories.isEmpty() ->
+                ErrorPane(state.errorMessage)
+            state.categories.isEmpty() -> EmptyPane()
             else -> {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
@@ -91,33 +97,16 @@ fun ExercisesScreen(
                         top = dimens.spacingL,
                         bottom = dimens.spacingL + bottomInset,
                     ),
-                    verticalArrangement = Arrangement.spacedBy(dimens.spacingS),
+                    verticalArrangement = Arrangement.spacedBy(dimens.spacingM),
                 ) {
-                    items(
-                        items = state.rows,
-                        key = { row ->
-                            when (row) {
-                                is ExerciseRow.Header -> "h:${row.category.slug}"
-                                is ExerciseRow.Item ->
-                                    "i:${row.categorySlug}/${row.exerciseSlug}"
-                            }
-                        },
-                    ) { row ->
-                        when (row) {
-                            is ExerciseRow.Header -> CategoryHeader(row)
-                            is ExerciseRow.Item -> {
-                                val status = state.statusByKey[
-                                    ExercisesState.key(row.categorySlug, row.exerciseSlug),
-                                ] ?: DownloadStatus.Idle
-                                ExerciseItemRow(
-                                    row = row,
-                                    status = status,
-                                    onDownload = {
-                                        onDownload(row.categorySlug, row.exerciseSlug)
-                                    },
-                                )
-                            }
-                        }
+                    items(items = state.categories, key = { it.slug }) { category ->
+                        val status = state.statusBySlug[category.slug] ?: DownloadStatus.Idle
+                        CategoryCard(
+                            category = category,
+                            status = status,
+                            onDownload = { onDownload(category.slug) },
+                            onOpen = { onOpen(category.slug) },
+                        )
                     }
                 }
             }
@@ -126,106 +115,118 @@ fun ExercisesScreen(
 }
 
 @Composable
-private fun CategoryHeader(row: ExerciseRow.Header) {
-    val colors = CppIde.colors
-    val dimens = CppIde.dimens
-
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(
-                top = dimens.spacingM,
-                bottom = dimens.spacingXs,
-            ),
-    ) {
-        SectionText(text = row.category.title)
-        row.category.description?.takeIf { it.isNotBlank() }?.let { desc ->
-            Spacer(Modifier.height(dimens.spacingXxs))
-            CaptionText(text = desc)
-        }
-        Spacer(Modifier.height(dimens.spacingXxs))
-        CaptionText(
-            text = "${row.category.exerciseCount} exercise" +
-                if (row.category.exerciseCount == 1) "" else "s",
-        )
-    }
-}
-
-@Composable
-private fun ExerciseItemRow(
-    row: ExerciseRow.Item,
+private fun CategoryCard(
+    category: ExerciseCategory,
     status: DownloadStatus,
     onDownload: () -> Unit,
+    onOpen: () -> Unit,
 ) {
     val colors = CppIde.colors
     val dimens = CppIde.dimens
-    val shape = RoundedCornerShape(dimens.radiusM)
+    val shape = RoundedCornerShape(dimens.radiusL)
 
-    Row(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
             .clip(shape)
             .background(colors.surface)
             .border(dimens.borderHairline, colors.border, shape)
-            .padding(horizontal = dimens.spacingL, vertical = dimens.spacingM),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(dimens.spacingM),
+            .padding(dimens.spacingL),
+        verticalArrangement = Arrangement.spacedBy(dimens.spacingM),
     ) {
-        // Numbered circle so the student can glance at order.
-        Box(
-            modifier = Modifier
-                .size(28.dp)
-                .clip(CircleShape)
-                .background(colors.surfaceElevated),
-            contentAlignment = Alignment.Center,
+        // Header row: icon circle + title + exercise count badge
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(dimens.spacingM),
         ) {
-            androidx.compose.material3.Text(
-                text = (row.orderIndex + 1).toString(),
-                color = colors.textSecondary,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Medium,
-            )
-        }
-
-        Column(modifier = Modifier.weight(1f)) {
-            BodyText(text = row.exerciseTitle, maxLines = 1)
-            CaptionText(text = row.categoryTitle)
-        }
-
-        when (status) {
-            DownloadStatus.Idle -> CppIconButton(
-                icon = Icons.Outlined.Download,
-                contentDescription = "Download",
-                onClick = onDownload,
-            )
-            DownloadStatus.Downloading -> Box(
-                modifier = Modifier.size(dimens.iconButtonSize),
-                contentAlignment = Alignment.Center,
-            ) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(20.dp),
-                    strokeWidth = 2.dp,
-                    color = colors.accent,
-                )
-            }
-            DownloadStatus.Done -> Box(
-                modifier = Modifier.size(dimens.iconButtonSize),
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .background(colors.surfaceElevated),
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
-                    imageVector = Icons.Outlined.CheckCircle,
-                    contentDescription = "Downloaded",
+                    imageVector = Icons.Outlined.School,
+                    contentDescription = null,
                     tint = colors.accent,
                     modifier = Modifier.size(dimens.iconSize),
                 )
             }
-            DownloadStatus.Failed -> CppIconButton(
-                icon = Icons.Outlined.ErrorOutline,
-                contentDescription = "Retry",
-                onClick = onDownload,
-                tint = CppIde.colors.textPrimary,
-            )
+
+            Column(modifier = Modifier.weight(1f)) {
+                androidx.compose.material3.Text(
+                    text = category.title,
+                    color = colors.textPrimary,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                CaptionText(
+                    text = "${category.exerciseCount} exercise" +
+                        if (category.exerciseCount == 1) "" else "s",
+                )
+            }
         }
+
+        // Optional description
+        category.description?.takeIf { it.isNotBlank() }?.let { desc ->
+            BodyText(text = desc, color = colors.textSecondary)
+        }
+
+        // Action row — single button that swaps in spinner/check/retry.
+        DownloadButton(
+            status = status,
+            onDownload = onDownload,
+            onOpen = onOpen,
+        )
+    }
+}
+
+@Composable
+private fun DownloadButton(
+    status: DownloadStatus,
+    onDownload: () -> Unit,
+    onOpen: () -> Unit,
+) {
+    val colors = CppIde.colors
+    val dimens = CppIde.dimens
+
+    when (status) {
+        DownloadStatus.Idle -> CppButton(
+            text = "Download all",
+            onClick = onDownload,
+            style = CppButtonStyle.Primary,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        DownloadStatus.Downloading -> Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(dimens.radiusS))
+                .background(colors.accent.copy(alpha = 0.15f))
+                .padding(vertical = dimens.spacingM),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(18.dp),
+                strokeWidth = 2.dp,
+                color = colors.accent,
+            )
+            Spacer(Modifier.size(dimens.spacingM))
+            CaptionText(text = "Downloading…", color = colors.accent)
+        }
+        DownloadStatus.Done -> CppButton(
+            text = "Open project",
+            onClick = onOpen,
+            style = CppButtonStyle.Primary,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        DownloadStatus.Failed -> CppButton(
+            text = "Retry download",
+            onClick = onDownload,
+            style = CppButtonStyle.Secondary,
+            modifier = Modifier.fillMaxWidth(),
+        )
     }
 }
 
@@ -242,7 +243,7 @@ private fun LoadingPane() {
             modifier = Modifier.size(36.dp),
         )
         Spacer(Modifier.height(dimens.spacingM))
-        CaptionText("Loading exercises…")
+        CaptionText("Loading categories…")
     }
 }
 
@@ -263,7 +264,7 @@ private fun ErrorPane(message: String) {
             modifier = Modifier.size(48.dp),
         )
         Spacer(Modifier.height(dimens.spacingM))
-        BodyText(text = "Couldn't load exercises")
+        BodyText(text = "Couldn't load categories")
         Spacer(Modifier.height(dimens.spacingXs))
         CaptionText(text = message)
     }
@@ -271,12 +272,11 @@ private fun ErrorPane(message: String) {
 
 @Composable
 private fun EmptyPane() {
-    val dimens = CppIde.dimens
     Column(
         modifier = Modifier.fillMaxSize(),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        CaptionText("No exercises available yet")
+        CaptionText("No categories available yet")
     }
 }
