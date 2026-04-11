@@ -347,8 +347,19 @@ class EditorViewModel(
             return
         }
         val rel = if (parentRelativePath.isEmpty()) trimmed else "$parentRelativePath/$trimmed"
+        // Seed .cpp / .c files with a tiny runnable main so the student
+        // can hit Run immediately instead of staring at an empty buffer.
+        // Other extensions get an empty file — we don't want to assume
+        // what a .md or .txt should contain.
+        val initialContent = when {
+            rel.endsWith(".cpp", ignoreCase = true) ||
+                rel.endsWith(".cc", ignoreCase = true) ||
+                rel.endsWith(".cxx", ignoreCase = true) -> STARTER_CPP
+            rel.endsWith(".c", ignoreCase = true) -> STARTER_C
+            else -> ""
+        }
         viewModelScope.launch {
-            core.projectService.createFile(rel, "")
+            core.projectService.createFile(rel, initialContent)
                 .onSuccess {
                     _state.update { it.copy(fileTree = core.projectService.fileTree.value) }
                     handle(EditorIntent.OpenFile(rel))
@@ -897,5 +908,26 @@ class EditorViewModel(
         private const val AUTO_SAVE_DELAY_MS = 1_000L
         /** How long after the last keystroke to push didChange to clangd. */
         private const val LSP_CHANGE_DEBOUNCE_MS = 200L
+
+        /** Starter content for newly-created .cpp / .cc / .cxx files. */
+        private val STARTER_CPP = """
+            |#include <iostream>
+            |using namespace std;
+            |
+            |int main() {
+            |    return 0;
+            |}
+            |
+        """.trimMargin()
+
+        /** Starter content for newly-created .c files. */
+        private val STARTER_C = """
+            |#include <stdio.h>
+            |
+            |int main(void) {
+            |    return 0;
+            |}
+            |
+        """.trimMargin()
     }
 }
