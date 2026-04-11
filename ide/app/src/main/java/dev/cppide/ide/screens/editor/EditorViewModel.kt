@@ -653,6 +653,8 @@ class EditorViewModel(
                 sources = listOf(source),
                 output = outputSo,
                 targetApi = 26,
+                shared = true,
+                wrapMain = true,
                 runtimeShim = core.runtimeShimSource(),
             )
 
@@ -759,6 +761,8 @@ class EditorViewModel(
                 output = outputSo,
                 targetApi = 26,
                 optimization = BuildConfig.Optimization.O0,
+                shared = true,
+                wrapMain = true,
                 runtimeShim = core.runtimeShimSource(),
                 extraFlags = listOf("-g", "-gz=none"),
             )

@@ -30,6 +30,10 @@ android {
         }
         release {
             isMinifyEnabled = false
+            // Sign release builds with the debug keystore so `installRelease`
+            // works on a plugged-in device without a production keystore.
+            // Replace with a proper signingConfigs block when shipping.
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
 

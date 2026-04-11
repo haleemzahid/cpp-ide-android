@@ -1,18 +1,26 @@
-// C++ runtime shim — must be compiled in C++ mode so the extern
-// declaration of user_main_fn gets C++ name mangling that matches the
-// user's hello.cpp (which is also C++, with main renamed via
-// -Dmain=user_main_fn at preprocess time).
+// C++ runtime shim — compiled in C++ mode alongside the user's sources.
 //
-// The run_user_main entry point is explicitly extern "C" so the JNI bridge's
-// dlsym("run_user_main") resolves to an unmangled symbol.
+// The user's `int main(...)` is renamed to `user_main_fn` via
+// -Dmain=user_main_fn at preprocess time. Beginners usually write
+// `int main()` (no args), but C++ also permits `int main(int, char**)`.
+// Both cases compile in the user's file — we just don't know which one
+// until link time, and we need the shim to reference the right overload.
+//
+// Trick: declare BOTH overloads as weak. The user defines exactly one;
+// the other remains weak-undefined, which the dynamic linker resolves
+// to NULL at load time (no "unresolved symbol" error under RTLD_NOW).
+// At call time we pick whichever function pointer is non-null.
+//
+// `run_user_main` itself is extern "C" so dlsym("run_user_main") resolves
+// to an unmangled symbol from the JNI bridge.
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 
-// NOT extern "C" — we want C++ mangling so this resolves to the same
-// symbol the user's hello.cpp produces (_Z12user_main_fniPPc).
-extern int user_main_fn(int argc, char** argv);
+// Overloaded, both weak. Exactly one gets defined by the user's code.
+int user_main_fn() __attribute__((weak));
+int user_main_fn(int argc, char** argv) __attribute__((weak));
 
 extern "C" int run_user_main(int argc, char** argv, int out_fd, int err_fd) {
     int saved_stdout = dup(STDOUT_FILENO);
@@ -25,7 +33,21 @@ extern "C" int run_user_main(int argc, char** argv, int out_fd, int err_fd) {
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
 
-    int rc = user_main_fn(argc, argv);
+    // Pick whichever overload the user defined. Static casts disambiguate
+    // which mangled symbol each pointer refers to, so the weak-NULL check
+    // works per-overload.
+    int (*f_void)() = static_cast<int (*)()>(user_main_fn);
+    int (*f_args)(int, char**) = static_cast<int (*)(int, char**)>(user_main_fn);
+
+    int rc;
+    if (f_void) {
+        rc = f_void();
+    } else if (f_args) {
+        rc = f_args(argc, argv);
+    } else {
+        fprintf(stderr, "run_user_main: no user main() defined\n");
+        rc = 127;
+    }
 
     fflush(stdout);
     fflush(stderr);

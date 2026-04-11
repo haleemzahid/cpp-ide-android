@@ -89,12 +89,22 @@ Java_dev_cppide_core_jni_NativeBridge_hasSymbol(
     const char* libPath = (*env)->GetStringUTFChars(env, jLibPath, NULL);
     const char* symbol  = (*env)->GetStringUTFChars(env, jSymbol, NULL);
 
+    dlerror();
     void* handle = dlopen(libPath, RTLD_NOW | RTLD_LOCAL);
     jboolean found = JNI_FALSE;
-    if (handle) {
+    if (!handle) {
+        const char* err = dlerror();
+        LOGE("hasSymbol: dlopen(%s) failed: %s", libPath, err ? err : "(null)");
+    } else {
         dlerror();
         void* sym = dlsym(handle, symbol);
-        if (sym) found = JNI_TRUE;
+        if (sym) {
+            found = JNI_TRUE;
+        } else {
+            const char* err = dlerror();
+            LOGE("hasSymbol: dlsym(%s, %s) failed: %s",
+                 libPath, symbol, err ? err : "(null)");
+        }
         dlclose(handle);
     }
 

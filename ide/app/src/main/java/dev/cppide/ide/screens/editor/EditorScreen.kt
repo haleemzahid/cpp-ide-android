@@ -191,14 +191,19 @@ fun EditorScreen(
         }
 
         // ---- run/stop FAB (bottom-right) ----
-        RunFab(
-            runState = state.runState,
-            onClick = { onIntent(EditorIntent.RunOrStop) },
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(end = dimens.spacingL, bottom = dimens.spacingL)
-                .navigationBarsPadding(),
-        )
+        // Hide the FAB for non-runnable files (e.g. README.md preview).
+        val openPath = state.openFile?.relativePath.orEmpty()
+        val isRunnableFile = !openPath.endsWith(".md", ignoreCase = true)
+        if (isRunnableFile) {
+            RunFab(
+                runState = state.runState,
+                onClick = { onIntent(EditorIntent.RunOrStop) },
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = dimens.spacingL, bottom = dimens.spacingL)
+                    .navigationBarsPadding(),
+            )
+        }
 
         // ---- modal drawer overlay ----
         if (state.drawerOpen) {
