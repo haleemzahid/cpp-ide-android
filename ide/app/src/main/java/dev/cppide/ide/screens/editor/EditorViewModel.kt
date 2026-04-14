@@ -12,6 +12,7 @@ import dev.cppide.core.lsp.LspCompletion
 import dev.cppide.core.project.Project
 import dev.cppide.core.run.RunConfig
 import dev.cppide.core.run.RunEvent
+import dev.cppide.ide.util.slugToTitle
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -195,7 +196,12 @@ class EditorViewModel(
             // ---- build / run ----
             EditorIntent.RunOrStop -> if (_state.value.isBusy) stop() else runCurrent()
             EditorIntent.ToggleBottomPanel -> _state.update { it.copy(bottomPanelVisible = !it.bottomPanelVisible) }
-            is EditorIntent.SwitchBottomTab -> _state.update { it.copy(bottomPanelTab = intent.tab, bottomPanelVisible = true) }
+            is EditorIntent.SwitchBottomTab -> {
+                val s = _state.value
+                if (s.bottomPanelTab != intent.tab || !s.bottomPanelVisible) {
+                    _state.update { it.copy(bottomPanelTab = intent.tab, bottomPanelVisible = true) }
+                }
+            }
             is EditorIntent.JumpToDiagnostic -> jumpTo(intent.diagnostic)
             EditorIntent.ClearTerminal -> _state.update { it.copy(terminalLines = emptyList()) }
 
@@ -233,9 +239,134 @@ class EditorViewModel(
                 }.onFailure { t -> appendError("remove bp: ${t.message}") }
             }
 
+            // ---- chat ----
+            is EditorIntent.UpdateChatInput -> _state.update { it.copy(chatState = it.chatState.copy(input = intent.text)) }
+            EditorIntent.SendChatMessage -> sendChatMessage()
+
             // ---- misc ----
             EditorIntent.DismissError -> _state.update { it.copy(errorMessage = null) }
         }
+    }
+
+    /** Load chat messages when user switches to the Chat tab for the current file. */
+    fun loadChatForCurrentFile() {
+        val openFile = _state.value.openFile ?: return
+        if (!openFile.relativePath.endsWith(".cpp", ignoreCase = true)) return
+        val filePath = buildChatFilePath() ?: return
+        if (_state.value.chatLoadedForPath == filePath) return
+
+        _state.update { it.copy(chatState = it.chatState.copy(isLoading = true)) }
+        viewModelScope.launch {
+            core.chatApi.getMessages(filePath)
+                .onSuccess { messages ->
+                    _state.update {
+                        it.copy(
+                            chatState = it.chatState.copy(messages = messages, isLoading = false, unreadCount = 0),
+                            chatLoadedForPath = filePath,
+                        )
+                    }
+                    // Reset persisted unread count on the server.
+                    core.chatApi.markRead(filePath)
+                }
+                .onFailure {
+                    _state.update { it.copy(chatState = it.chatState.copy(isLoading = false)) }
+                }
+        }
+    }
+
+    /** Silently refresh chat messages (no loading indicator). Called by polling. */
+    fun refreshChat() {
+        val filePath = buildChatFilePath() ?: return
+        if (_state.value.chatLoadedForPath != filePath) return
+        viewModelScope.launch {
+            core.chatApi.getMessages(filePath)
+                .onSuccess { messages ->
+                    if (messages != _state.value.chatState.messages) {
+                        _state.update {
+                            it.copy(chatState = it.chatState.copy(messages = messages))
+                        }
+                    }
+                }
+        }
+    }
+
+    /**
+     * Check for unread messages via the server's persisted unread_count.
+     * Called periodically when the chat tab is not active.
+     */
+    fun checkUnread() {
+        viewModelScope.launch {
+            core.chatApi.unreadSummary()
+                .onSuccess { entries ->
+                    val totalUnread = entries.sumOf { it.unreadCount }
+                    if (totalUnread != _state.value.chatState.unreadCount) {
+                        _state.update {
+                            it.copy(chatState = it.chatState.copy(unreadCount = totalUnread))
+                        }
+                    }
+                }
+        }
+    }
+
+    private fun sendChatMessage() {
+        val s = _state.value
+        val body = s.chatState.input.trim()
+        if (body.isEmpty() || s.chatState.isSending) return
+
+        val openFile = s.openFile ?: return
+        val filePath = buildChatFilePath() ?: return
+        val (categorySlug, exerciseSlug) = parseSlugs() ?: return
+
+        _state.update { it.copy(chatState = it.chatState.copy(isSending = true)) }
+        viewModelScope.launch {
+            val mdPath = openFile.relativePath
+                .substringBeforeLast("/") + "/README.md"
+            val mdContent = core.projectService.read(mdPath).getOrNull()
+
+            core.chatApi.sendMessage(
+                filePath = filePath,
+                categorySlug = categorySlug,
+                exerciseSlug = exerciseSlug,
+                body = body,
+                codeSnapshot = openFile.content,
+                mdSnapshot = mdContent,
+            ).onSuccess { msg ->
+                _state.update {
+                    it.copy(chatState = it.chatState.copy(
+                        messages = it.chatState.messages + msg,
+                        input = "",
+                        isSending = false,
+                    ))
+                }
+            }.onFailure { t ->
+                _state.update {
+                    it.copy(
+                        chatState = it.chatState.copy(isSending = false),
+                        errorMessage = "Send failed: ${t.message}",
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * Build the server-side file path from the project-relative path.
+     * Exercise projects live under `projects/<category>/<exercise>/`,
+     * so we strip the `projects/` prefix to get `<cat>/<ex>/file.cpp`.
+     */
+    private fun buildChatFilePath(): String? {
+        val openFile = _state.value.openFile ?: return null
+        // The project root is like .../projects/<category>. The file's
+        // relativePath is like "<exercise>/solution.cpp".
+        val categorySlug = project.root.name
+        return "$categorySlug/${openFile.relativePath}"
+    }
+
+    private fun parseSlugs(): Pair<String, String>? {
+        val openFile = _state.value.openFile ?: return null
+        val categorySlug = project.root.name
+        val exerciseSlug = openFile.relativePath.substringBefore("/")
+        return categorySlug to exerciseSlug
     }
 
     // ---- file ops ----
@@ -284,8 +415,20 @@ class EditorViewModel(
                         )
                     }
                     persistUiState()
-                    // Tell clangd we opened the file. Language id by extension.
+                    // Record in recent files for the Welcome screen.
                     val file = core.projectService.resolve(relativePath)
+                    val fileName = relativePath.substringAfterLast("/")
+                    if (fileName.endsWith(".cpp", ignoreCase = true)) {
+                        val exerciseName = relativePath.substringBefore("/").slugToTitle()
+                        core.sessionRepository.touchFile(
+                            filePath = file.absolutePath,
+                            projectRoot = project.root.absolutePath,
+                            projectName = project.name,
+                            relativePath = relativePath,
+                            displayName = exerciseName,
+                        )
+                    }
+                    // Tell clangd we opened the file. Language id by extension.
                     val lang = if (file.extension.lowercase() == "c") "c" else "cpp"
                     core.lspService.didOpen(file, lang, content)
                 }
@@ -302,7 +445,7 @@ class EditorViewModel(
         if (s.debuggerState.isActive) {
             viewModelScope.launch { runCatching { core.debuggerService.stop() } }
         }
-        _state.update { it.copy(activeTabIndex = index) }
+        _state.update { it.copy(activeTabIndex = index, chatState = ChatPanelState(), chatLoadedForPath = null) }
         persistUiState()
     }
 

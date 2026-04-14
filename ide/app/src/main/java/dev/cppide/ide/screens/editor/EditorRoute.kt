@@ -22,6 +22,8 @@ fun EditorRoute(
     core: Core,
     project: Project,
     onBack: () -> Unit,
+    initialOpenFile: String? = null,
+    initialOpenChat: Boolean = false,
 ) {
     val viewModel = remember(project.root.absolutePath) {
         EditorViewModel(core, project)
@@ -29,8 +31,16 @@ fun EditorRoute(
     val state by viewModel.state.collectAsState()
     val context = LocalContext.current
 
-    // Listen for one-shot events from the VM. Share is the only one
-    // right now — others (snackbars, dialogs) will join later.
+    // When coming from Questions screen, open the specific file and chat panel.
+    LaunchedEffect(viewModel, initialOpenFile, initialOpenChat) {
+        if (initialOpenFile != null) {
+            viewModel.handle(EditorIntent.OpenFile(initialOpenFile))
+        }
+        if (initialOpenChat) {
+            viewModel.handle(EditorIntent.SwitchBottomTab(BottomPanelTab.Chat))
+        }
+    }
+
     LaunchedEffect(viewModel) {
         viewModel.events.collect { event ->
             when (event) {
@@ -54,5 +64,8 @@ fun EditorRoute(
         onBack = onBack,
         onRequestCompletion = viewModel::requestCompletion,
         onRequestHover = viewModel::requestHover,
+        onChatOpened = viewModel::loadChatForCurrentFile,
+        onChatRefresh = viewModel::refreshChat,
+        onCheckUnread = viewModel::checkUnread,
     )
 }

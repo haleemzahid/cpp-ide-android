@@ -1,12 +1,9 @@
 package dev.cppide.core
 
 import android.content.Context
-import dev.cppide.core.ai.AiEngine
-import dev.cppide.core.ai.DefaultModelRepository
-import dev.cppide.core.ai.LiteRtAiEngine
-import dev.cppide.core.ai.ModelRepository
 import dev.cppide.core.build.BuildService
 import dev.cppide.core.build.ClangBuildService
+import dev.cppide.core.chat.ChatApiClient
 import dev.cppide.core.common.DefaultDispatchers
 import dev.cppide.core.common.DispatcherProvider
 import dev.cppide.core.debug.DebuggerService
@@ -21,6 +18,8 @@ import dev.cppide.core.run.DefaultRunService
 import dev.cppide.core.run.RunService
 import dev.cppide.core.session.RoomSessionRepository
 import dev.cppide.core.session.SessionRepository
+import dev.cppide.core.solutions.SolutionsApiClient
+import dev.cppide.core.student.StudentAuthClient
 import dev.cppide.core.toolchain.TermuxToolchain
 import dev.cppide.core.toolchain.Toolchain
 import java.io.File
@@ -47,11 +46,12 @@ class Core private constructor(
     val projectService: ProjectService,
     val sessionRepository: SessionRepository,
     val lspService: LspService,
-    val modelRepository: ModelRepository,
-    val aiEngine: AiEngine,
     val debuggerSpike: DebuggerSpike,
     val debuggerService: DebuggerService,
     val exercisesApi: ExercisesApiClient,
+    val studentAuth: StudentAuthClient,
+    val chatApi: ChatApiClient,
+    val solutionsApi: SolutionsApiClient,
 ) {
 
     /**
@@ -90,6 +90,7 @@ class Core private constructor(
         ): Core {
             val app = context.applicationContext
             val toolchain = TermuxToolchain(app, dispatchers)
+            val studentAuth = StudentAuthClient(app, dispatchers)
             return Core(
                 context = app,
                 dispatchers = dispatchers,
@@ -99,14 +100,12 @@ class Core private constructor(
                 projectService = DefaultProjectService(dispatchers),
                 sessionRepository = RoomSessionRepository(app, dispatchers),
                 lspService = ClangdLspService(toolchain, dispatchers),
-                modelRepository = DefaultModelRepository(app, dispatchers),
-                aiEngine = LiteRtAiEngine(
-                    dispatchers = dispatchers,
-                    cacheDir = File(app.filesDir, "ai-cache"),
-                ),
                 debuggerSpike = DebuggerSpike(toolchain, dispatchers),
                 debuggerService = LldbDebuggerService(toolchain, dispatchers),
                 exercisesApi = ExercisesApiClient(dispatchers),
+                studentAuth = studentAuth,
+                chatApi = ChatApiClient(dispatchers, studentAuth),
+                solutionsApi = SolutionsApiClient(dispatchers, studentAuth),
             )
         }
     }

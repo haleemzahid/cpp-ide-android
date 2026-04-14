@@ -28,6 +28,11 @@ fun AboutRoute(
                 Intent(Intent.ACTION_VIEW, Uri.parse("https://dawlify.com"))
             )
         },
+        onOpenInstagram = {
+            context.startActivity(
+                Intent(Intent.ACTION_VIEW, Uri.parse("https://www.instagram.com/shahid_khan_dev/"))
+            )
+        },
         onEmail = {
             val intent = Intent(Intent.ACTION_SENDTO).apply {
                 data = Uri.parse("mailto:shahidkhan.dev88@gmail.com")

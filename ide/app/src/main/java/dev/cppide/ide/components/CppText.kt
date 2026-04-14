@@ -4,6 +4,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import dev.cppide.ide.theme.CppIde
 
@@ -46,6 +47,7 @@ fun BodyText(
     modifier: Modifier = Modifier,
     color: Color = CppIde.colors.textPrimary,
     maxLines: Int = Int.MAX_VALUE,
+    textDecoration: TextDecoration? = null,
 ) = Text(
     text = text,
     modifier = modifier,
@@ -53,6 +55,7 @@ fun BodyText(
     style = CppIde.typography.bodyMedium,
     maxLines = maxLines,
     overflow = TextOverflow.Ellipsis,
+    textDecoration = textDecoration,
 )
 
 @Composable

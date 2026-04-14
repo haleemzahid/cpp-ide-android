@@ -25,6 +25,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.Email
 import androidx.compose.material.icons.outlined.Language
+import androidx.compose.material.icons.outlined.PhotoCamera
 import androidx.compose.material.icons.outlined.Rocket
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -34,6 +35,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.cppide.ide.components.BodyText
@@ -53,6 +55,7 @@ fun AboutScreen(
     onBack: () -> Unit,
     onOpenWebsite: () -> Unit,
     onOpenDawlify: () -> Unit,
+    onOpenInstagram: () -> Unit,
     onEmail: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -122,14 +125,22 @@ fun AboutScreen(
             ContactRow(
                 icon = Icons.Outlined.Language,
                 label = "Website",
-                value = "shahidkhan.dev",
+                value = "https://shahidkhan.dev",
                 onClick = onOpenWebsite,
+                valueAsLink = true,
             )
             ContactRow(
                 icon = Icons.Outlined.Rocket,
                 label = "Dawlify",
                 value = "dawlify.com",
                 onClick = onOpenDawlify,
+            )
+            ContactRow(
+                icon = Icons.Outlined.PhotoCamera,
+                label = "Instagram",
+                value = "@shahid_khan_dev",
+                onClick = onOpenInstagram,
+                valueAsLink = true,
             )
             ContactRow(
                 icon = Icons.Outlined.Email,
@@ -184,6 +195,7 @@ private fun ContactRow(
     label: String,
     value: String,
     onClick: () -> Unit,
+    valueAsLink: Boolean = false,
 ) {
     val colors = CppIde.colors
     val dimens = CppIde.dimens
@@ -211,7 +223,11 @@ private fun ContactRow(
         )
         Column(modifier = Modifier.weight(1f)) {
             CaptionText(text = label)
-            BodyText(text = value, color = colors.textPrimary)
+            BodyText(
+                text = value,
+                color = if (valueAsLink) colors.accent else colors.textPrimary,
+                textDecoration = if (valueAsLink) TextDecoration.Underline else null,
+            )
         }
     }
 }

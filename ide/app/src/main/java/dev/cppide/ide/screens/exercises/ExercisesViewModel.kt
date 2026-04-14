@@ -36,6 +36,8 @@ class ExercisesViewModel(
     private val _openProject = MutableSharedFlow<Project>(extraBufferCapacity = 2)
     val openProject: SharedFlow<Project> = _openProject.asSharedFlow()
 
+    private val projectsRoot = File(core.context.filesDir, "projects")
+
     init {
         refresh()
     }
@@ -45,12 +47,17 @@ class ExercisesViewModel(
             _state.update { it.copy(loading = true, errorMessage = null) }
             core.exercisesApi.listCategories()
                 .onSuccess { categories ->
+                    // Check which categories are already downloaded on disk.
+                    val existing = categories
+                        .filter { File(projectsRoot, sanitise(it.slug)).exists() }
+                        .associate { it.slug to DownloadStatus.Done }
                     _state.update {
                         it.copy(
                             loading = false,
                             categories = categories.sortedWith(
                                 compareBy({ it.orderIndex }, { it.title }),
                             ),
+                            statusBySlug = existing + it.statusBySlug,
                         )
                     }
                 }
@@ -96,6 +103,19 @@ class ExercisesViewModel(
                 // wants to stay on the catalog so they can queue up
                 // more downloads. The "Downloaded — tap to open" state
                 // on the card lets them jump in when they're ready.
+                // Restore saved solutions from the server (cloud backup).
+                core.solutionsApi.getByCategory(categorySlug)
+                    .onSuccess { saved ->
+                        for (solution in saved) {
+                            val file = File(
+                                project.root,
+                                "${sanitise(solution.exerciseSlug)}/solution.cpp",
+                            )
+                            if (file.exists()) {
+                                file.writeText(solution.content)
+                            }
+                        }
+                    }
                 core.sessionRepository.touch(
                     project.root.absolutePath,
                     project.name,

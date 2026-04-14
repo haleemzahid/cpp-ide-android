@@ -44,6 +44,19 @@ termux-pkgs/libuser_compiled.so
 **/jniLibs/*/libdebug_target.so
 **/jniLibs/*/libTrampoline.so
 
+# ---- Release signing (never commit) ----
+release.jks
+release-signing.txt
+*.jks
+*.keystore
+
+# ---- Claude Code local settings ----
+.claude/
+**/.claude/
+
+# ---- Nested vendored git clones (not proper submodules) ----
+ide/third_party/
+
 # ---- IDE / OS noise ----
 .DS_Store
 Thumbs.db

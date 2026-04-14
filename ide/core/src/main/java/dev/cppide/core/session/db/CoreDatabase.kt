@@ -6,13 +6,14 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 
 @Database(
-    entities = [RecentProjectEntity::class],
-    version = 1,
+    entities = [RecentProjectEntity::class, RecentFileEntity::class],
+    version = 2,
     exportSchema = false,
 )
 internal abstract class CoreDatabase : RoomDatabase() {
 
     abstract fun recentProjectDao(): RecentProjectDao
+    abstract fun recentFileDao(): RecentFileDao
 
     companion object {
         private const val NAME = "cppide-core.db"
@@ -26,7 +27,8 @@ internal abstract class CoreDatabase : RoomDatabase() {
                     context.applicationContext,
                     CoreDatabase::class.java,
                     NAME,
-                ).build().also { INSTANCE = it }
+                ).fallbackToDestructiveMigration()
+                    .build().also { INSTANCE = it }
             }
     }
 }

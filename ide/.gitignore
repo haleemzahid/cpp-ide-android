@@ -6,6 +6,10 @@ local.properties
 .cxx/
 captures/
 .externalNativeBuild/
+# Release signing — never commit keystores or credentials
+*.jks
+*.keystore
+release-signing.txt
 # Staged Termux toolchain artifacts (regenerate with stage_toolchain.py)
 core/src/main/jniLibs/*/libclang.so
 core/src/main/jniLibs/*/libld.so

@@ -1,51 +1,44 @@
 package dev.cppide.ide
 
-import android.Manifest
-import android.content.pm.PackageManager
-import android.os.Build
+import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.core.content.ContextCompat
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
+import androidx.navigation.NavType
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
 import dev.cppide.core.Core
 import dev.cppide.core.project.Project
 import dev.cppide.core.session.RecentProject
 import dev.cppide.ide.screens.about.AboutRoute
-import dev.cppide.ide.screens.chat.ChatRoute
+import dev.cppide.ide.screens.auth.AuthRoute
 import dev.cppide.ide.screens.editor.EditorRoute
 import dev.cppide.ide.screens.exercises.ExercisesRoute
-import dev.cppide.ide.screens.settings.SettingsRoute
+import dev.cppide.ide.screens.onboarding.OnboardingScreen
+import dev.cppide.ide.screens.questions.QuestionsRoute
 import dev.cppide.ide.screens.welcome.NewProjectDialog
 import dev.cppide.ide.screens.welcome.WelcomeRoute
+import dev.cppide.ide.util.slugToTitle
 import dev.cppide.ide.theme.CppIdeTheme
 import kotlinx.coroutines.launch
 import java.io.File
 
-/**
- * Single hosting activity. The whole app is one Compose tree under
- * [CppIdeTheme]. Screen navigation is a tiny state machine here — we'll
- * graduate to Jetpack Navigation Compose once there are more than a
- * handful of screens.
- */
 class MainActivity : ComponentActivity() {
-
-    private val notificationPermissionLauncher =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* result ignored */ }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         val core = (application as CppIdeApp).core
-
-        maybeRequestNotificationPermission()
 
         setContent {
             CppIdeTheme {
@@ -53,87 +46,168 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
-
-    /**
-     * On Android 13+ the system silently drops foreground-service progress
-     * notifications unless POST_NOTIFICATIONS has been granted. Ask once
-     * on launch — the user can still deny; the download service works
-     * without a visible notification, just less informatively.
-     */
-    private fun maybeRequestNotificationPermission() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
-        val granted = ContextCompat.checkSelfPermission(
-            this,
-            Manifest.permission.POST_NOTIFICATIONS,
-        ) == PackageManager.PERMISSION_GRANTED
-        if (!granted) {
-            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-        }
-    }
 }
 
-/** Top-level screen state — extend this when adding more destinations. */
-private sealed interface Destination {
-    data object Welcome : Destination
-    data class Editor(val project: Project) : Destination
-    data object Settings : Destination
-    data object Chat : Destination
-    data object About : Destination
-    data object Exercises : Destination
+private object Routes {
+    const val ONBOARDING = "onboarding"
+    const val AUTH = "auth"
+    const val WELCOME = "welcome"
+    const val ABOUT = "about"
+    const val EXERCISES = "exercises"
+    const val QUESTIONS = "questions"
+
+    const val EDITOR = "editor/{rootPath}/{name}?openFile={openFile}&openChat={openChat}"
+    fun editor(
+        project: Project,
+        openFile: String? = null,
+        openChat: Boolean = false,
+    ): String {
+        val root = Uri.encode(project.root.absolutePath)
+        val name = Uri.encode(project.name)
+        var route = "editor/$root/$name"
+        val params = mutableListOf<String>()
+        if (openFile != null) params.add("openFile=${Uri.encode(openFile)}")
+        if (openChat) params.add("openChat=true")
+        if (params.isNotEmpty()) route += "?" + params.joinToString("&")
+        return route
+    }
 }
 
 @Composable
 private fun AppNavigation(core: Core) {
-    var destination by remember { mutableStateOf<Destination>(Destination.Welcome) }
+    val navController = rememberNavController()
     var showNewProject by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
-    when (val current = destination) {
-        Destination.Welcome -> {
+    // Check onboarding + auth state on launch.
+    var authChecked by remember { mutableStateOf(false) }
+    var isLoggedIn by remember { mutableStateOf(false) }
+    val prefs = remember {
+        core.context.getSharedPreferences("onboarding", android.content.Context.MODE_PRIVATE)
+    }
+    val hasSeenOnboarding = remember { prefs.getBoolean("seen", false) }
+
+    LaunchedEffect(Unit) {
+        isLoggedIn = core.studentAuth.tryRestore()
+        authChecked = true
+    }
+
+    if (!authChecked) return
+
+    val startDest = when {
+        !hasSeenOnboarding -> Routes.ONBOARDING
+        isLoggedIn -> Routes.WELCOME
+        else -> Routes.AUTH
+    }
+
+    NavHost(navController = navController, startDestination = startDest) {
+        composable(Routes.ONBOARDING) {
+            OnboardingScreen(
+                onFinish = {
+                    prefs.edit().putBoolean("seen", true).apply()
+                    navController.navigate(Routes.AUTH) {
+                        popUpTo(Routes.ONBOARDING) { inclusive = true }
+                    }
+                },
+            )
+        }
+        composable(Routes.AUTH) {
+            AuthRoute(
+                core = core,
+                onAuthenticated = {
+                    isLoggedIn = true
+                    navController.navigate(Routes.WELCOME) {
+                        popUpTo(Routes.AUTH) { inclusive = true }
+                    }
+                },
+            )
+        }
+        composable(Routes.WELCOME) {
             WelcomeRoute(
                 core = core,
                 onOpenProject = { recent ->
-                    val project = recent.toProject()
-                    destination = Destination.Editor(project)
+                    navController.navigate(Routes.editor(recent.toProject()))
+                },
+                onOpenRecentFile = { file ->
+                    val project = Project(
+                        name = file.projectName,
+                        root = File(file.projectRoot),
+                    )
+                    navController.navigate(
+                        Routes.editor(project, openFile = file.relativePath)
+                    )
                 },
                 onCreateNew = { showNewProject = true },
-                onOpenExercises = { destination = Destination.Exercises },
-                onAbout = { destination = Destination.About },
-                onChat = { destination = Destination.Chat },
-                onSettings = { destination = Destination.Settings },
+                onOpenExercises = { navController.navigate(Routes.EXERCISES) },
+                onOpenQuestions = { navController.navigate(Routes.QUESTIONS) },
+                onAbout = { navController.navigate(Routes.ABOUT) },
+                onLogout = {
+                    isLoggedIn = false
+                    navController.navigate(Routes.AUTH) {
+                        popUpTo(0) { inclusive = true }
+                    }
+                },
             )
         }
-        is Destination.Editor -> {
+        composable(
+            route = Routes.EDITOR,
+            arguments = listOf(
+                navArgument("rootPath") { type = NavType.StringType },
+                navArgument("name") { type = NavType.StringType },
+                navArgument("openFile") { type = NavType.StringType; defaultValue = "" },
+                navArgument("openChat") { type = NavType.BoolType; defaultValue = false },
+            ),
+        ) { entry ->
+            val rootPath = entry.arguments?.getString("rootPath").orEmpty()
+            val name = entry.arguments?.getString("name").orEmpty()
+            val openFile = entry.arguments?.getString("openFile")?.takeIf { it.isNotEmpty() }
+            val openChat = entry.arguments?.getBoolean("openChat") == true
+            val project = remember(rootPath, name) {
+                Project(name = name, root = File(rootPath))
+            }
             EditorRoute(
                 core = core,
-                project = current.project,
-                onBack = { destination = Destination.Welcome },
+                project = project,
+                initialOpenFile = openFile,
+                initialOpenChat = openChat,
+                onBack = { navController.popBackStack() },
             )
         }
-        Destination.Settings -> {
-            SettingsRoute(
-                core = core,
-                onBack = { destination = Destination.Welcome },
-            )
-        }
-        Destination.Chat -> {
-            ChatRoute(
-                core = core,
-                onBack = { destination = Destination.Welcome },
-                onOpenSettings = { destination = Destination.Settings },
-            )
-        }
-        Destination.About -> {
+        composable(Routes.ABOUT) {
             AboutRoute(
-                onBack = { destination = Destination.Welcome },
+                onBack = { navController.popBackStack() },
             )
         }
-        Destination.Exercises -> {
+        composable(Routes.EXERCISES) {
             ExercisesRoute(
                 core = core,
-                onBack = { destination = Destination.Welcome },
+                onBack = { navController.popBackStack() },
                 onOpenProject = { project ->
-                    destination = Destination.Editor(project)
+                    navController.navigate(Routes.editor(project))
+                },
+            )
+        }
+        composable(Routes.QUESTIONS) {
+            QuestionsRoute(
+                core = core,
+                onBack = { navController.popBackStack() },
+                onOpenConversation = { conv ->
+                    // The conversation's filePath is like "category/exercise/solution.cpp".
+                    // The project root is filesDir/projects/<category>.
+                    val categorySlug = conv.categorySlug
+                    val projectRoot = File(
+                        File(core.context.filesDir, "projects"),
+                        categorySlug,
+                    ).canonicalFile
+                    val project = Project(
+                        name = categorySlug.slugToTitle(),
+                        root = projectRoot,
+                    )
+                    scope.launch {
+                        core.sessionRepository.touch(projectRoot.absolutePath, project.name)
+                    }
+                    val exerciseFile = "${conv.exerciseSlug}/solution.cpp"
+                    navController.navigate(Routes.editor(project, openFile = exerciseFile, openChat = true))
                 },
             )
         }
@@ -148,7 +222,7 @@ private fun AppNavigation(core: Core) {
                     val project = createProject(core, name)
                     if (project != null) {
                         core.sessionRepository.touch(project.root.absolutePath, project.name)
-                        destination = Destination.Editor(project)
+                        navController.navigate(Routes.editor(project))
                     }
                 }
             },
@@ -156,10 +230,6 @@ private fun AppNavigation(core: Core) {
     }
 }
 
-/**
- * Creates a project directory under app-private storage with a starter
- * main.cpp. Returns null on failure (caller can show a snackbar later).
- */
 private suspend fun createProject(core: Core, name: String): Project? {
     val safeName = name.replace(Regex("""[^A-Za-z0-9._-]"""), "_")
     val root = File(File(core.context.filesDir, "projects"), safeName)

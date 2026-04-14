@@ -7,10 +7,37 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+// Release signing — credentials live in local.properties (gitignored).
+// If any key is missing we fall back to the debug keystore so local
+// `assembleRelease` still works for contributors without the prod cert.
+val signingProps = Properties().apply {
+    val f = rootProject.file("local.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
+}
+val releaseStoreFile = signingProps.getProperty("RELEASE_STORE_FILE")
+val releaseStorePassword = signingProps.getProperty("RELEASE_STORE_PASSWORD")
+val releaseKeyAlias = signingProps.getProperty("RELEASE_KEY_ALIAS")
+val releaseKeyPassword = signingProps.getProperty("RELEASE_KEY_PASSWORD")
+val hasReleaseSigning = releaseStoreFile != null &&
+    releaseStorePassword != null &&
+    releaseKeyAlias != null &&
+    releaseKeyPassword != null
+
 android {
     namespace = "dev.cppide.ide"
     compileSdk = 36
     ndkVersion = "27.1.12297006"
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = file(releaseStoreFile!!)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
 
     defaultConfig {
         applicationId = "dev.cppide.ide"
@@ -38,10 +65,14 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
-            // Sign release builds with the debug keystore so `installRelease`
-            // works on a plugged-in device without a production keystore.
-            // Replace with a proper signingConfigs block when shipping.
-            signingConfig = signingConfigs.getByName("debug")
+            // Use the production signing config when local.properties
+            // supplies credentials; otherwise fall back to the debug
+            // keystore so contributors can still run `installRelease`.
+            signingConfig = if (hasReleaseSigning) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
 
@@ -75,6 +106,7 @@ dependencies {
     implementation(libs.androidx.lifecycle.viewmodel)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.activity.compose)
+    implementation(libs.androidx.navigation.compose)
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.ui)
     implementation(libs.androidx.ui.graphics)

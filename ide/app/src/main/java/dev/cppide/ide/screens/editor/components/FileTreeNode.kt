@@ -26,6 +26,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.draw.clip
 import dev.cppide.core.project.ProjectNode
 import dev.cppide.ide.components.BodyText
 import dev.cppide.ide.components.CaptionText
@@ -60,6 +62,7 @@ fun FileTreeNode(
     depth: Int,
     activePath: String?,
     selectedFolder: String,
+    chatUnreadPaths: Set<String>,
     onFileClick: (String) -> Unit,
     onFolderSelect: (String) -> Unit,
     onAddFileToFolder: (String) -> Unit,
@@ -76,6 +79,7 @@ fun FileTreeNode(
                 node = node,
                 indent = indent,
                 isActive = node.relativePath == activePath,
+                hasUnread = node.relativePath in chatUnreadPaths,
                 onClick = { onFileClick(node.relativePath) },
                 onRename = { onRenameFile(node.relativePath) },
                 onDelete = { onDeleteFile(node.relativePath) },
@@ -87,6 +91,7 @@ fun FileTreeNode(
             indent = indent,
             activePath = activePath,
             selectedFolder = selectedFolder,
+            chatUnreadPaths = chatUnreadPaths,
             onFileClick = onFileClick,
             onFolderSelect = onFolderSelect,
             onAddFileToFolder = onAddFileToFolder,
@@ -101,6 +106,7 @@ private fun FileRow(
     node: ProjectNode.File,
     indent: androidx.compose.ui.unit.Dp,
     isActive: Boolean,
+    hasUnread: Boolean,
     onClick: () -> Unit,
     onRename: () -> Unit,
     onDelete: () -> Unit,
@@ -131,6 +137,14 @@ private fun FileRow(
             color = if (isActive) colors.textPrimary else colors.textSecondary,
             modifier = Modifier.weight(1f),
         )
+        if (hasUnread) {
+            androidx.compose.foundation.layout.Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .clip(CircleShape)
+                    .background(colors.diagnosticError),
+            )
+        }
         RowActionIcon(
             icon = Icons.Outlined.DriveFileRenameOutline,
             contentDescription = "Rename",
@@ -152,6 +166,7 @@ private fun DirectoryRow(
     indent: androidx.compose.ui.unit.Dp,
     activePath: String?,
     selectedFolder: String,
+    chatUnreadPaths: Set<String>,
     onFileClick: (String) -> Unit,
     onFolderSelect: (String) -> Unit,
     onAddFileToFolder: (String) -> Unit,
@@ -192,10 +207,16 @@ private fun DirectoryRow(
                 color = colors.textPrimary,
                 modifier = Modifier.weight(1f),
             )
-            // Child count badge — lets the student see at a glance
-            // which folders are non-empty (e.g. a category with 50
-            // exercise subfolders looks very different from one that
-            // was just created and is empty).
+            val prefix = if (node.relativePath.isEmpty()) "" else "${node.relativePath}/"
+            val folderHasUnread = chatUnreadPaths.any { it.startsWith(prefix) }
+            if (folderHasUnread) {
+                androidx.compose.foundation.layout.Box(
+                    modifier = Modifier
+                        .size(8.dp)
+                        .clip(CircleShape)
+                        .background(colors.diagnosticError),
+                )
+            }
             val visibleChildCount = node.children.count { child ->
                 when (child) {
                     is ProjectNode.Directory -> true
@@ -221,6 +242,7 @@ private fun DirectoryRow(
                     depth = depth + 1,
                     activePath = activePath,
                     selectedFolder = selectedFolder,
+                    chatUnreadPaths = chatUnreadPaths,
                     onFileClick = onFileClick,
                     onFolderSelect = onFolderSelect,
                     onAddFileToFolder = onAddFileToFolder,

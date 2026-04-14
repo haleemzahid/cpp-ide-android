@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 108">
+  <!-- Background is supplied by the adaptive-icon wrapper; this SVG is the
+       foreground layer. Canvas is 108x108 with a 72x72 safe zone centred. -->
+  <g fill="none" stroke="#FFFFFF" stroke-width="6"
+     stroke-linecap="round" stroke-linejoin="round">
+    <!-- Left chevron < -->
+    <path d="M44 40 L30 54 L44 68" />
+    <!-- Right chevron > -->
+    <path d="M64 40 L78 54 L64 68" />
+    <!-- Diagonal slash / -->
+    <path d="M60 34 L48 74" />
+  </g>
+</svg>

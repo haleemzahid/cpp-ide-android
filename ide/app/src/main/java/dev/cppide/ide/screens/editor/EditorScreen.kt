@@ -3,25 +3,35 @@ package dev.cppide.ide.screens.editor
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import dev.cppide.core.lsp.LspCompletion
+import dev.cppide.ide.components.CaptionText
+import dev.cppide.ide.components.CppHorizontalDivider
 import dev.cppide.ide.components.MarkdownView
 import dev.cppide.ide.screens.editor.components.BottomPanel
 import dev.cppide.ide.screens.editor.components.EditorController
@@ -46,7 +56,9 @@ import dev.cppide.ide.theme.CppIde
  *   │      EditorPane (active file)    │ ← weight(1f)
  *   │                                  │
  *   ├──────────────────────────────────┤
- *   │ BottomPanel (Terminal/Problems)  │ ← shown only if visible
+ *   │ CollapsedPanelBar (when hidden)  │ ← tap to open bottom panel
+ *   │  — OR —                          │
+ *   │ BottomPanel (when visible)       │
  *   └──────────────────────────────────┘
  *                                  ┌─┐
  *                                  │▶│  ← FAB overlay (BottomEnd)
@@ -61,18 +73,38 @@ fun EditorScreen(
     onBack: () -> Unit,
     onRequestCompletion: suspend (liveContent: String, line: Int, column: Int) -> List<LspCompletion>,
     onRequestHover: suspend (line: Int, column: Int) -> String?,
+    onChatOpened: () -> Unit,
+    onChatRefresh: () -> Unit,
+    onCheckUnread: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val colors = CppIde.colors
     val dimens = CppIde.dimens
 
-    // Handle to the live sora editor, published by EditorPane once it's
-    // been constructed. Held here so the top bar can drive undo/redo
-    // without the screen or top bar needing to know about sora at all.
     var controller by remember { mutableStateOf<EditorController?>(null) }
 
-    // System back: dismiss overlays first, then return to welcome.
-    // Without this, back falls through to the activity and exits the app.
+    // Load chat messages only when the chat tab transitions to active.
+    val chatActive = state.bottomPanelVisible && state.bottomPanelTab == BottomPanelTab.Chat
+    LaunchedEffect(chatActive) {
+        if (chatActive) onChatOpened()
+    }
+
+    // Poll for new messages every 5s while the chat tab is visible.
+    // Check for unread every 10s when chat tab is NOT visible (for badge).
+    LaunchedEffect(chatActive) {
+        if (chatActive) {
+            while (true) {
+                kotlinx.coroutines.delay(5_000)
+                onChatRefresh()
+            }
+        } else {
+            while (true) {
+                kotlinx.coroutines.delay(10_000)
+                onCheckUnread()
+            }
+        }
+    }
+
     BackHandler {
         when {
             state.drawerOpen -> onIntent(EditorIntent.CloseDrawer)
@@ -87,7 +119,6 @@ fun EditorScreen(
             .background(colors.background)
             .imePadding(),
     ) {
-        // ---- main column: top bar + editor body + bottom panel ----
         Column(modifier = Modifier.fillMaxSize()) {
             val isMarkdown = state.openFile?.name?.endsWith(".md", ignoreCase = true) == true
             EditorTopBar(
@@ -108,8 +139,6 @@ fun EditorScreen(
                 },
             )
 
-            // Thin progress bar driven by project-level + file-level
-            // loading flags. Kept to 2dp so it's a subtle hint, not a modal.
             if (state.projectLoading || state.fileLoading) {
                 LinearProgressIndicator(
                     modifier = Modifier
@@ -143,8 +172,6 @@ fun EditorScreen(
                     )
                 } else {
                     EditorPane(
-                        // Stable per-file id so the editor recreates only when
-                        // the user opens a different file, not on every keystroke.
                         fileId = openFile.relativePath,
                         initialContent = openFile.savedContent,
                         onContentChange = { onIntent(EditorIntent.EditContent(it)) },
@@ -167,6 +194,10 @@ fun EditorScreen(
                 }
             }
 
+            val ext = state.openFile?.name?.substringAfterLast('.', "")?.lowercase()
+            val isCodeFile = ext in setOf("cpp", "c", "cc", "cxx", "h", "hpp")
+            val isCppFile = isCodeFile
+
             if (state.bottomPanelVisible) {
                 BottomPanel(
                     activeTab = state.bottomPanelTab,
@@ -174,6 +205,8 @@ fun EditorScreen(
                     problems = state.allProblems,
                     debuggerState = state.debuggerState,
                     breakpoints = state.breakpoints,
+                    chatState = state.chatState,
+                    isCppFile = isCppFile,
                     onSelectTab = { onIntent(EditorIntent.SwitchBottomTab(it)) },
                     onClose = { onIntent(EditorIntent.ToggleBottomPanel) },
                     onClearTerminal = { onIntent(EditorIntent.ClearTerminal) },
@@ -186,26 +219,37 @@ fun EditorScreen(
                     onToggleBreakpoint = { bp ->
                         onIntent(EditorIntent.RemoveBreakpoint(bp))
                     },
+                    onChatInputChange = { onIntent(EditorIntent.UpdateChatInput(it)) },
+                    onChatSend = { onIntent(EditorIntent.SendChatMessage) },
+                )
+            } else {
+                // Collapsed panel bar — always visible, lets user open
+                // the panel without needing to hit Run first.
+                CollapsedPanelBar(
+                    chatUnreadCount = state.chatState.unreadCount,
+                    isCodeFile = isCppFile,
+                    onSelectTab = { tab ->
+                        onIntent(EditorIntent.SwitchBottomTab(tab))
+                    },
                 )
             }
         }
 
-        // ---- run/stop FAB (bottom-right) ----
-        // Hide the FAB for non-runnable files (e.g. README.md preview).
+        // Run/stop FAB (bottom-right). Hide for non-runnable files.
         val openPath = state.openFile?.relativePath.orEmpty()
         val isRunnableFile = !openPath.endsWith(".md", ignoreCase = true)
-        if (isRunnableFile) {
+        if (isRunnableFile && !state.bottomPanelVisible) {
             RunFab(
                 runState = state.runState,
                 onClick = { onIntent(EditorIntent.RunOrStop) },
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
-                    .padding(end = dimens.spacingL, bottom = dimens.spacingL)
+                    .padding(end = dimens.spacingL, bottom = dimens.spacingL + 32.dp)
                     .navigationBarsPadding(),
             )
         }
 
-        // ---- modal drawer overlay ----
+        // Modal drawer overlay.
         if (state.drawerOpen) {
             Box(
                 modifier = Modifier
@@ -213,10 +257,17 @@ fun EditorScreen(
                     .background(Color.Black.copy(alpha = 0.4f))
                     .clickable { onIntent(EditorIntent.CloseDrawer) },
             )
+            // Build the set of file paths with unread chat messages.
+            val chatUnreadPaths = if (state.chatState.unreadCount > 0) {
+                val openPath = state.openFile?.relativePath
+                if (openPath != null) setOf(openPath) else emptySet()
+            } else emptySet()
+
             FileTreeDrawer(
                 projectName = state.project.name,
                 tree = state.fileTree,
                 activePath = state.openFile?.relativePath,
+                chatUnreadPaths = chatUnreadPaths,
                 onFileClick = { path -> onIntent(EditorIntent.OpenFile(path)) },
                 onCreateFile = { parent, name ->
                     onIntent(EditorIntent.CreateFile(parent, name))
@@ -232,4 +283,62 @@ fun EditorScreen(
             )
         }
     }
+}
+
+/**
+ * Thin bar at the bottom of the editor when the panel is collapsed.
+ * Shows tab labels so the user can open any panel tab with one tap —
+ * not just via the Run button. Includes a badge dot on Chat if there
+ * are unread messages.
+ */
+@Composable
+private fun CollapsedPanelBar(
+    chatUnreadCount: Int,
+    isCodeFile: Boolean,
+    onSelectTab: (BottomPanelTab) -> Unit,
+) {
+    val colors = CppIde.colors
+    val dimens = CppIde.dimens
+
+    Column(modifier = Modifier.fillMaxWidth().navigationBarsPadding()) {
+        CppHorizontalDivider()
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(colors.surface)
+                .padding(horizontal = dimens.spacingM, vertical = dimens.spacingS),
+            horizontalArrangement = Arrangement.spacedBy(dimens.spacingL),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (isCodeFile) {
+                CollapsedTab("Terminal") { onSelectTab(BottomPanelTab.Terminal) }
+                CollapsedTab("Problems") { onSelectTab(BottomPanelTab.Problems) }
+                CollapsedTab("Debug") { onSelectTab(BottomPanelTab.Debug) }
+            }
+            Row(
+                modifier = Modifier.clickable { onSelectTab(BottomPanelTab.Chat) },
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                CaptionText(text = "Chat", color = colors.textSecondary)
+                if (chatUnreadCount > 0) {
+                    Box(
+                        modifier = Modifier
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(colors.diagnosticError),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CollapsedTab(label: String, onClick: () -> Unit) {
+    CaptionText(
+        text = label,
+        color = CppIde.colors.textSecondary,
+        modifier = Modifier.clickable(onClick = onClick),
+    )
 }

@@ -1,6 +1,7 @@
 package dev.cppide.ide.screens.editor
 
 import dev.cppide.core.build.Diagnostic
+import dev.cppide.core.chat.ChatMessage
 import dev.cppide.core.debug.BreakpointState
 import dev.cppide.core.debug.DebuggerState
 import dev.cppide.core.debug.SourceBreakpoint
@@ -47,6 +48,11 @@ data class EditorState(
     val debuggerState: DebuggerState = DebuggerState.Idle,
     /** All user breakpoints, keyed by (file, line). Survives debug sessions. */
     val breakpoints: Map<SourceBreakpoint, BreakpointState> = emptyMap(),
+
+    // ---- chat ----
+    val chatState: ChatPanelState = ChatPanelState(),
+    /** File path that chatState.messages were loaded for. Used to avoid re-fetching. */
+    val chatLoadedForPath: String? = null,
 ) {
     /** The currently active tab's file, or null when no tabs are open. */
     val openFile: OpenFile?
@@ -114,4 +120,12 @@ enum class RunState {
     Running,
 }
 
-enum class BottomPanelTab { Terminal, Problems, Debug }
+enum class BottomPanelTab { Terminal, Problems, Debug, Chat }
+
+data class ChatPanelState(
+    val messages: List<ChatMessage> = emptyList(),
+    val input: String = "",
+    val isSending: Boolean = false,
+    val isLoading: Boolean = false,
+    val unreadCount: Int = 0,
+)

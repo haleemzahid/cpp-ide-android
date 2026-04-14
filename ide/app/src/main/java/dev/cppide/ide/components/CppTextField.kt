@@ -7,12 +7,14 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.input.VisualTransformation
 import dev.cppide.ide.theme.CppIde
 
 /**
@@ -28,6 +30,9 @@ fun CppTextField(
     placeholder: String? = null,
     enabled: Boolean = true,
     textStyle: TextStyle = CppIde.typography.bodyMedium,
+    visualTransformation: VisualTransformation = VisualTransformation.None,
+    keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
+    keyboardActions: KeyboardActions = KeyboardActions.Default,
 ) {
     val colors = CppIde.colors
     val dimens = CppIde.dimens
@@ -39,7 +44,7 @@ fun CppTextField(
             .clip(shape)
             .background(colors.background)
             .border(dimens.borderHairline, colors.border, shape)
-            .padding(horizontal = dimens.spacingM, vertical = dimens.spacingM),
+            .padding(horizontal = dimens.spacingL, vertical = dimens.spacingL),
     ) {
         if (value.isEmpty() && placeholder != null) {
             Text(
@@ -54,6 +59,9 @@ fun CppTextField(
             singleLine = true,
             textStyle = textStyle.copy(color = colors.textPrimary),
             cursorBrush = androidx.compose.ui.graphics.SolidColor(colors.accent),
+            visualTransformation = visualTransformation,
+            keyboardOptions = keyboardOptions,
+            keyboardActions = keyboardActions,
             modifier = modifier.fillMaxWidth(),
         )
     }

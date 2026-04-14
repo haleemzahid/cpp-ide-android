@@ -16,8 +16,6 @@ class CppIdeApp : Application() {
     override fun onCreate() {
         super.onCreate()
         core = Core.create(this)
-        // Load TextMate grammars + theme exactly once per process so any
-        // editor view created later has syntax highlighting available.
         TextMateBootstrap.init(this)
     }
 }

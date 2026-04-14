@@ -1,6 +1,7 @@
 package dev.cppide.ide.screens.welcome
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -17,41 +18,49 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.Chat
+import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Info
-import androidx.compose.material.icons.outlined.School
-import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Logout
+import androidx.compose.material.icons.outlined.QuestionAnswer
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import dev.cppide.core.session.RecentFile
 import dev.cppide.core.session.RecentProject
+import dev.cppide.ide.components.BodyText
 import dev.cppide.ide.components.CaptionText
 import dev.cppide.ide.components.CppButton
 import dev.cppide.ide.components.CppButtonStyle
+import dev.cppide.ide.components.CppCard
 import dev.cppide.ide.components.CppIconButton
 import dev.cppide.ide.components.CppTopBar
 import dev.cppide.ide.components.SectionText
 import dev.cppide.ide.theme.CppIde
+import dev.cppide.ide.util.formatRelativeTime
 
-/**
- * Stateless welcome screen. Receives the recent-project list as state
- * and emits intents up — keeps the screen testable in isolation. Wired
- * to [dev.cppide.core.session.SessionRepository] by [WelcomeRoute].
- */
 @Composable
 fun WelcomeScreen(
     recents: List<RecentProject>,
+    recentFiles: List<RecentFile>,
+    studentName: String?,
+    totalUnread: Int,
+    isUploading: Boolean,
+    uploadResult: String?,
     onOpenProject: (RecentProject) -> Unit,
+    onOpenRecentFile: (RecentFile) -> Unit,
     onTogglePin: (RecentProject) -> Unit,
     onDeleteProject: (RecentProject) -> Unit,
     onCreateNew: () -> Unit,
     onOpenExercises: () -> Unit,
+    onOpenQuestions: () -> Unit,
+    onUploadSolutions: () -> Unit,
     onAbout: () -> Unit,
-    onChat: () -> Unit,
-    onSettings: () -> Unit,
+    onLogout: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val colors = CppIde.colors
@@ -63,31 +72,36 @@ fun WelcomeScreen(
             .background(colors.background),
     ) {
         CppTopBar(
-            title = "C++ IDE",
+            title = if (studentName != null) "Hi, $studentName" else "C++ IDE",
             trailing = {
                 Row {
-                    // Order matches user request: About → Chat → Settings.
+                    BadgedBox(
+                        badge = {
+                            if (totalUnread > 0) {
+                                Badge { CaptionText("$totalUnread", color = CppIde.colors.textOnAccent) }
+                            }
+                        },
+                    ) {
+                        CppIconButton(
+                            icon = Icons.Outlined.QuestionAnswer,
+                            contentDescription = "My Questions",
+                            onClick = onOpenQuestions,
+                        )
+                    }
                     CppIconButton(
                         icon = Icons.Outlined.Info,
                         contentDescription = "About",
                         onClick = onAbout,
                     )
                     CppIconButton(
-                        icon = Icons.AutoMirrored.Outlined.Chat,
-                        contentDescription = "Chat with AI",
-                        onClick = onChat,
-                    )
-                    CppIconButton(
-                        icon = Icons.Outlined.Settings,
-                        contentDescription = "Settings",
-                        onClick = onSettings,
+                        icon = Icons.Outlined.Logout,
+                        contentDescription = "Log out",
+                        onClick = onLogout,
                     )
                 }
             },
         )
 
-        // Add navigation-bar inset to the bottom of the scroll area so the
-        // last item isn't hidden behind the system gesture / nav bar.
         val navInsets = WindowInsets.navigationBars.asPaddingValues()
         LazyColumn(
             modifier = Modifier
@@ -101,9 +115,20 @@ fun WelcomeScreen(
             ),
             verticalArrangement = Arrangement.spacedBy(dimens.spacingM),
         ) {
-            item {
-                SectionText("Recent")
+            // ---- Recent Files section ----
+            if (recentFiles.isNotEmpty()) {
+                item { SectionText("Recent Files") }
+                items(items = recentFiles, key = { it.filePath }) { file ->
+                    RecentFileCard(
+                        file = file,
+                        onClick = { onOpenRecentFile(file) },
+                    )
+                }
+                item { Spacer(Modifier.height(dimens.spacingM)) }
             }
+
+            // ---- Projects section ----
+            item { SectionText("Projects") }
 
             if (recents.isEmpty()) {
                 item { EmptyRecentsHint() }
@@ -136,6 +161,54 @@ fun WelcomeScreen(
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
+            item {
+                CppButton(
+                    text = if (isUploading) "Uploading…" else "Upload my progress",
+                    onClick = onUploadSolutions,
+                    enabled = !isUploading,
+                    style = CppButtonStyle.Secondary,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            if (uploadResult != null) {
+                item {
+                    CaptionText(
+                        text = uploadResult,
+                        color = if (uploadResult.startsWith("Upload failed"))
+                            colors.diagnosticError else colors.accent,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RecentFileCard(
+    file: RecentFile,
+    onClick: () -> Unit,
+) {
+    val colors = CppIde.colors
+    val dimens = CppIde.dimens
+
+    CppCard(onClick = onClick) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(dimens.spacingM),
+        ) {
+            Icon(
+                imageVector = Icons.Outlined.Code,
+                contentDescription = null,
+                tint = colors.accent,
+                modifier = Modifier.size(dimens.iconSize),
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                BodyText(text = file.displayName, maxLines = 1)
+                CaptionText(
+                    text = "${file.projectName} · ${file.relativePath.substringAfterLast("/")} · ${formatRelativeTime(file.lastOpenedAt)}",
+                    maxLines = 1,
+                )
+            }
         }
     }
 }
@@ -156,6 +229,7 @@ private fun EmptyRecentsHint() {
             tint = CppIde.colors.textDisabled,
             modifier = Modifier.size(48.dp),
         )
-        CaptionText("No recent projects yet")
+        CaptionText("No projects yet")
     }
 }
+

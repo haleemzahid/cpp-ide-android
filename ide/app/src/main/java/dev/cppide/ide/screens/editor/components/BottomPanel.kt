@@ -1,5 +1,7 @@
 package dev.cppide.ide.screens.editor.components
 
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,14 +17,10 @@ import dev.cppide.core.debug.DebuggerState
 import dev.cppide.core.debug.SourceBreakpoint
 import dev.cppide.ide.components.CppHorizontalDivider
 import dev.cppide.ide.screens.editor.BottomPanelTab
+import dev.cppide.ide.screens.editor.ChatPanelState
 import dev.cppide.ide.screens.editor.TerminalLine
 import dev.cppide.ide.theme.CppIde
 
-/**
- * Container for the editor's bottom panel. Holds the tab strip + active
- * tab content. Fixed height for now (40% of editor area would need a
- * Layout — punting drag-to-resize to v2).
- */
 @Composable
 fun BottomPanel(
     activeTab: BottomPanelTab,
@@ -30,6 +28,8 @@ fun BottomPanel(
     problems: List<Diagnostic>,
     debuggerState: DebuggerState,
     breakpoints: Map<SourceBreakpoint, BreakpointState>,
+    chatState: ChatPanelState,
+    isCppFile: Boolean,
     onSelectTab: (BottomPanelTab) -> Unit,
     onClose: () -> Unit,
     onClearTerminal: () -> Unit,
@@ -40,26 +40,32 @@ fun BottomPanel(
     onDebugPause: () -> Unit,
     onDebugStop: () -> Unit,
     onToggleBreakpoint: (SourceBreakpoint) -> Unit,
+    onChatInputChange: (String) -> Unit,
+    onChatSend: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val colors = CppIde.colors
+    val contentHeight = if (activeTab == BottomPanelTab.Chat) 360.dp else 220.dp
 
     Column(
         modifier = modifier
             .fillMaxWidth()
             .background(colors.surface)
-            .navigationBarsPadding(),
+            .navigationBarsPadding()
+            .animateContentSize(animationSpec = tween(200)),
     ) {
         CppHorizontalDivider()
         BottomPanelTabs(
             activeTab = activeTab,
             problemCount = problems.size,
+            chatUnreadCount = chatState.unreadCount,
+            isCodeFile = isCppFile,
             onSelectTab = onSelectTab,
             onClose = onClose,
             onClearTerminal = onClearTerminal,
         )
         CppHorizontalDivider()
-        Box(modifier = Modifier.fillMaxWidth().height(220.dp)) {
+        Box(modifier = Modifier.fillMaxWidth().height(contentHeight)) {
             when (activeTab) {
                 BottomPanelTab.Terminal -> TerminalView(lines = terminalLines)
                 BottomPanelTab.Problems -> ProblemsList(
@@ -75,6 +81,15 @@ fun BottomPanel(
                     onPause = onDebugPause,
                     onStop = onDebugStop,
                     onToggleBreakpoint = onToggleBreakpoint,
+                )
+                BottomPanelTab.Chat -> ChatPanel(
+                    messages = chatState.messages,
+                    inputText = chatState.input,
+                    isSending = chatState.isSending,
+                    isLoading = chatState.isLoading,
+                    isCppFile = isCppFile,
+                    onInputChange = onChatInputChange,
+                    onSend = onChatSend,
                 )
             }
         }

@@ -47,6 +47,10 @@ sealed interface EditorIntent {
      *  currently-open file. Used by the Debug panel's breakpoint list. */
     data class RemoveBreakpoint(val breakpoint: SourceBreakpoint) : EditorIntent
 
+    // chat
+    data class UpdateChatInput(val text: String) : EditorIntent
+    data object SendChatMessage : EditorIntent
+
     // misc
     data object DismissError : EditorIntent
 }

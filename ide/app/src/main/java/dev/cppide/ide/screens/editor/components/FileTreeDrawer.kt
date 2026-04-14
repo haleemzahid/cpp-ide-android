@@ -46,6 +46,7 @@ fun FileTreeDrawer(
     projectName: String,
     tree: ProjectNode.Directory?,
     activePath: String?,
+    chatUnreadPaths: Set<String>,
     onFileClick: (String) -> Unit,
     onCreateFile: (parent: String, name: String) -> Unit,
     onCreateDirectory: (parent: String, name: String) -> Unit,
@@ -109,6 +110,7 @@ fun FileTreeDrawer(
                     depth = 0,
                     activePath = activePath,
                     selectedFolder = selectedParent,
+                    chatUnreadPaths = chatUnreadPaths,
                     onFileClick = onFileClick,
                     onFolderSelect = { path -> selectedParent = path },
                     onAddFileToFolder = { folderPath ->

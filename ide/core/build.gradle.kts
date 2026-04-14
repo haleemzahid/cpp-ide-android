@@ -92,12 +92,6 @@ dependencies {
     api(libs.lsp4j)
     api(libs.lsp4j.jsonrpc)
 
-    // LiteRT-LM — on-device LLM runtime. `api` because the AiEngine
-    // facade in dev.cppide.core.ai exposes a Kotlin Flow wrapped
-    // around this library, and Flow<String> is opaque to callers —
-    // but if we later expose Engine/Backend config types from core we
-    // want them resolvable from the app module without extra imports.
-    api(libs.litertlm.android)
 }
 
 // --------------------------------------------------------------------------
