@@ -48,6 +48,21 @@ data class EditorState(
     val debuggerState: DebuggerState = DebuggerState.Idle,
     /** All user breakpoints, keyed by (file, line). Survives debug sessions. */
     val breakpoints: Map<SourceBreakpoint, BreakpointState> = emptyMap(),
+    /**
+     * Variable scopes for the top frame of the current stop, fetched
+     * lazily from the debugger after each `stopped` event. Empty when
+     * not stopped or fetch is in flight. Each scope holds its own
+     * variables — UI fetches them on expand.
+     */
+    val debugScopes: List<dev.cppide.core.debug.Scope> = emptyList(),
+    /**
+     * Variables under each scope (or nested variable), indexed by the
+     * DAP variablesReference handle. Tree expansion adds entries as
+     * the user taps to drill down.
+     */
+    val debugVariables: Map<Int, List<dev.cppide.core.debug.Variable>> = emptyMap(),
+    /** UI tree state: which variablesReference handles are currently expanded. */
+    val expandedVariableRefs: Set<Int> = emptySet(),
 
     // ---- chat ----
     val chatState: ChatPanelState = ChatPanelState(),
@@ -120,7 +135,7 @@ enum class RunState {
     Running,
 }
 
-enum class BottomPanelTab { Terminal, Problems, Debug, Chat }
+enum class BottomPanelTab { Terminal, Problems, Variables, Chat }
 
 data class ChatPanelState(
     val messages: List<ChatMessage> = emptyList(),

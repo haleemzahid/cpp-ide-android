@@ -7,8 +7,7 @@ import dev.cppide.core.chat.ChatApiClient
 import dev.cppide.core.common.DefaultDispatchers
 import dev.cppide.core.common.DispatcherProvider
 import dev.cppide.core.debug.DebuggerService
-import dev.cppide.core.debug.DebuggerSpike
-import dev.cppide.core.debug.LldbDebuggerService
+import dev.cppide.core.debug.LldbDapDebuggerService
 import dev.cppide.core.exercises.ExercisesApiClient
 import dev.cppide.core.lsp.ClangdLspService
 import dev.cppide.core.lsp.LspService
@@ -46,7 +45,6 @@ class Core private constructor(
     val projectService: ProjectService,
     val sessionRepository: SessionRepository,
     val lspService: LspService,
-    val debuggerSpike: DebuggerSpike,
     val debuggerService: DebuggerService,
     val exercisesApi: ExercisesApiClient,
     val studentAuth: StudentAuthClient,
@@ -100,8 +98,11 @@ class Core private constructor(
                 projectService = DefaultProjectService(dispatchers),
                 sessionRepository = RoomSessionRepository(app, dispatchers),
                 lspService = ClangdLspService(toolchain, dispatchers),
-                debuggerSpike = DebuggerSpike(toolchain, dispatchers),
-                debuggerService = LldbDebuggerService(toolchain, dispatchers),
+                debuggerService = LldbDapDebuggerService(
+                    toolchain = toolchain,
+                    workingDir = app.filesDir,
+                    dispatchers = dispatchers,
+                ),
                 exercisesApi = ExercisesApiClient(dispatchers),
                 studentAuth = studentAuth,
                 chatApi = ChatApiClient(dispatchers, studentAuth),

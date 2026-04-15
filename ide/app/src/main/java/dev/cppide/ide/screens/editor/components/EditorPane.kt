@@ -5,19 +5,14 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
@@ -26,8 +21,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -37,9 +30,6 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color as ComposeColor
-import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -50,12 +40,10 @@ import io.github.rosemoe.sora.event.ClickEvent
 import io.github.rosemoe.sora.event.ContentChangeEvent
 import io.github.rosemoe.sora.event.EditorMotionEvent
 import io.github.rosemoe.sora.event.LongPressEvent
-import io.github.rosemoe.sora.event.ScrollEvent
 import io.github.rosemoe.sora.langs.textmate.TextMateColorScheme
 import io.github.rosemoe.sora.langs.textmate.TextMateLanguage
 import io.github.rosemoe.sora.langs.textmate.registry.GrammarRegistry
 import io.github.rosemoe.sora.langs.textmate.registry.ThemeRegistry
-import io.github.rosemoe.sora.widget.CodeEditor
 import kotlinx.coroutines.launch
 
 /**
@@ -119,24 +107,11 @@ fun EditorPane(
     // Currently-shown hover text; null when no tooltip is visible.
     var hoverText by remember(fileId) { mutableStateOf<String?>(null) }
 
-    // Live reference to the CodeEditor so Compose overlays can compute
-    // their Y positions from its scroll state. We take over drawing
-    // entirely for breakpoints + current line — the Styles/LineSideIcon
-    // path is incompatible with our TextMate analyzer, which replaces
-    // the Styles object on every analysis pass.
-    var editorRef by remember(fileId) { mutableStateOf<CodeEditor?>(null) }
-    // Live scroll position + row height, updated from ScrollEvent. Px.
-    var scrollYpx by remember(fileId) { mutableStateOf(0) }
-    var rowHeightPx by remember(fileId) { mutableStateOf(0) }
-    // Tick on every scroll so derived offsets recompose.
-    var scrollTick by remember(fileId) { mutableStateOf(0) }
-
-    // When the debugger stops inside the current file, scroll into view.
-    LaunchedEffect(editorRef, currentLine) {
-        val editor = editorRef ?: return@LaunchedEffect
-        val line = currentLine ?: return@LaunchedEffect
-        try { editor.jumpToLine(line - 1) } catch (_: Throwable) {}
-    }
+    // Live reference to the editor. DebugCodeEditor paints the current
+    // execution line and breakpoint gutter markers inside its own
+    // onDraw — no Compose overlay, no scroll-event tracking, no pixel
+    // math that drifts during programmatic scrolls.
+    var editorRef by remember(fileId) { mutableStateOf<DebugCodeEditor?>(null) }
 
     Box(
         modifier = modifier
@@ -144,10 +119,10 @@ fun EditorPane(
             .background(colors.editorBackground),
     ) {
         key(fileId) {
-            AndroidView(
+            AndroidView<DebugCodeEditor>(
                 modifier = Modifier.fillMaxSize(),
                 factory = { context ->
-                    CodeEditor(context).apply {
+                    DebugCodeEditor(context).apply {
                         // Theme + language. LspCppLanguage wraps TextMateLanguage
                         // so we keep syntax highlighting, bracket/indent logic,
                         // etc., while replacing the identifier-based
@@ -171,6 +146,17 @@ fun EditorPane(
                         isHighlightCurrentLine = true
                         tabWidth = 4
                         isWordwrap = false
+                        // Wider gutter so the breakpoint tap target is
+                        // comfortable on a phone. Default is ~3-4 dp on
+                        // each side which makes setting a breakpoint
+                        // feel like trying to tap a hair. We bump both
+                        // the left padding (before the numbers) and the
+                        // divider gap (after the numbers) so the total
+                        // gutter is closer to ~44 dp which matches
+                        // Material's recommended touch target.
+                        val dpUnitPx = dpUnit
+                        setLineNumberMarginLeft(dpUnitPx * 14f)
+                        setDividerMargin(dpUnitPx * 8f, dpUnitPx * 10f)
 
                         // Initial content. Set once; the editor owns it from here.
                         setText(initialContent)
@@ -212,78 +198,22 @@ fun EditorPane(
                             override fun redo() { this@apply.redo() }
                         })
                         editorRef = this@apply
-
-                        // Feed scroll events to the overlay so breakpoint
-                        // dots and current-line highlight track the view.
-                        subscribeAlways(ScrollEvent::class.java) { evt ->
-                            scrollYpx = evt.endY
-                            if (rowHeightPx == 0) rowHeightPx = rowHeight
-                            scrollTick++
-                        }
                     }
                 },
-                // No-op update — the editor manages its own content. Switching
-                // files is handled by the surrounding `key(fileId)` block, which
-                // disposes and recreates the editor with the new initialContent.
+                // Apply Compose state changes to the editor view. Both
+                // setters invalidate internally, so the editor repaints
+                // on state change. When the current execution line moves
+                // to a new value, center it in the viewport too.
                 update = { editor ->
-                    // Seed the row height on first layout — ScrollEvent only
-                    // fires when the view actually moves, so without this the
-                    // overlay computes y=0 for every line on initial display.
-                    if (rowHeightPx == 0 && editor.rowHeight > 0) {
-                        rowHeightPx = editor.rowHeight
+                    editor.breakpointLines = breakpointLines
+                    val prev = editor.currentExecutionLine
+                    editor.currentExecutionLine = currentLine
+                    if (currentLine != null && currentLine != prev) {
+                        editor.scrollToLineCentered(currentLine)
                     }
                 },
                 onRelease = { editor -> editor.release() },
             )
-        }
-
-        // ---- debugger decoration overlay ----
-        // Read scrollTick so Compose recomposes on every scroll event.
-        @Suppress("UNUSED_EXPRESSION") scrollTick
-        val editor = editorRef
-        if (editor != null && rowHeightPx > 0) {
-            val density = LocalDensity.current
-            // Y pixel of (1-indexed) line number relative to the editor's
-            // top-left corner, accounting for current scroll.
-            fun lineTopPx(line: Int): Int = (line - 1) * rowHeightPx - scrollYpx
-
-            // --- current-line amber bar (behind text, spans full width) ---
-            currentLine?.let { line ->
-                val top = lineTopPx(line)
-                if (top + rowHeightPx >= 0) {
-                    Box(
-                        modifier = Modifier
-                            .offset {
-                                IntOffset(x = 0, y = top.coerceAtLeast(-rowHeightPx))
-                            }
-                            .fillMaxWidth()
-                            .height(with(density) { rowHeightPx.toDp() })
-                            .background(ComposeColor(0x553A1FA0)),
-                    )
-                }
-            }
-
-            // --- breakpoint dots in the gutter ---
-            for ((line, verified) in breakpointLines) {
-                val top = lineTopPx(line)
-                // Skip lines scrolled far above the viewport.
-                if (top + rowHeightPx < 0) continue
-                val dotColor = if (verified)
-                    ComposeColor(0xFFF14C4C)
-                else
-                    ComposeColor(0xFF848484)
-                Box(
-                    modifier = Modifier
-                        .offset {
-                            IntOffset(
-                                x = with(density) { 4.dp.roundToPx() },
-                                y = top + (rowHeightPx - with(density) { 10.dp.roundToPx() }) / 2,
-                            )
-                        }
-                        .size(10.dp)
-                        .background(dotColor, CircleShape),
-                )
-            }
         }
 
         // ---- hover tooltip overlay ----

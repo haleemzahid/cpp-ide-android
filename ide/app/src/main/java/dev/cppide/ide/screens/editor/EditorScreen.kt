@@ -25,6 +25,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import dev.cppide.ide.screens.editor.components.FloatingDebugPanel
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -192,6 +193,19 @@ fun EditorScreen(
                         modifier = Modifier.fillMaxSize(),
                     )
                 }
+                // Floating VSCode-style debug toolbar overlay. Lives
+                // INSIDE the editor box so it tracks the editor's
+                // bounds (not the bottom panel or top app bar). The
+                // panel composable fills the whole editor box so it
+                // can measure those bounds for drag clamping; inside,
+                // it positions the actual toolbar top-center and
+                // applies the user's drag offset. Touches on empty
+                // space pass through to the editor underneath.
+                FloatingDebugPanel(
+                    debuggerState = state.debuggerState,
+                    onIntent = onIntent,
+                    modifier = Modifier.fillMaxSize(),
+                )
             }
 
             val ext = state.openFile?.name?.substringAfterLast('.', "")?.lowercase()
@@ -204,20 +218,17 @@ fun EditorScreen(
                     terminalLines = state.terminalLines,
                     problems = state.allProblems,
                     debuggerState = state.debuggerState,
-                    breakpoints = state.breakpoints,
+                    debugScopes = state.debugScopes,
+                    debugVariables = state.debugVariables,
+                    expandedVariableRefs = state.expandedVariableRefs,
                     chatState = state.chatState,
                     isCppFile = isCppFile,
                     onSelectTab = { onIntent(EditorIntent.SwitchBottomTab(it)) },
                     onClose = { onIntent(EditorIntent.ToggleBottomPanel) },
                     onClearTerminal = { onIntent(EditorIntent.ClearTerminal) },
                     onJumpToProblem = { onIntent(EditorIntent.JumpToDiagnostic(it)) },
-                    onStartDebug = { onIntent(EditorIntent.StartDebug) },
-                    onDebugStep = { onIntent(EditorIntent.DebugStep) },
-                    onDebugContinue = { onIntent(EditorIntent.DebugContinue) },
-                    onDebugPause = { onIntent(EditorIntent.DebugPause) },
-                    onDebugStop = { onIntent(EditorIntent.DebugStop) },
-                    onToggleBreakpoint = { bp ->
-                        onIntent(EditorIntent.RemoveBreakpoint(bp))
+                    onToggleVariableExpansion = { ref ->
+                        onIntent(EditorIntent.ToggleVariableExpansion(ref))
                     },
                     onChatInputChange = { onIntent(EditorIntent.UpdateChatInput(it)) },
                     onChatSend = { onIntent(EditorIntent.SendChatMessage) },
@@ -235,13 +246,18 @@ fun EditorScreen(
             }
         }
 
-        // Run/stop FAB (bottom-right). Hide for non-runnable files.
+        // Run/debug FAB (bottom-right). Hide for non-runnable files,
+        // and hide while the debugger is active (the floating debug
+        // toolbar over the editor handles all controls in that mode).
         val openPath = state.openFile?.relativePath.orEmpty()
         val isRunnableFile = !openPath.endsWith(".md", ignoreCase = true)
-        if (isRunnableFile && !state.bottomPanelVisible) {
+        val debuggerActive = state.debuggerState.isActive
+        if (isRunnableFile && !state.bottomPanelVisible && !debuggerActive) {
             RunFab(
                 runState = state.runState,
-                onClick = { onIntent(EditorIntent.RunOrStop) },
+                onRun = { onIntent(EditorIntent.RunOrStop) },
+                onDebug = { onIntent(EditorIntent.StartDebug) },
+                onStop = { onIntent(EditorIntent.RunOrStop) },
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
                     .padding(end = dimens.spacingL, bottom = dimens.spacingL + 32.dp)
@@ -313,7 +329,7 @@ private fun CollapsedPanelBar(
             if (isCodeFile) {
                 CollapsedTab("Terminal") { onSelectTab(BottomPanelTab.Terminal) }
                 CollapsedTab("Problems") { onSelectTab(BottomPanelTab.Problems) }
-                CollapsedTab("Debug") { onSelectTab(BottomPanelTab.Debug) }
+                CollapsedTab("Variables") { onSelectTab(BottomPanelTab.Variables) }
             }
             Row(
                 modifier = Modifier.clickable { onSelectTab(BottomPanelTab.Chat) },

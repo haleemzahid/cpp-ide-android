@@ -5,16 +5,17 @@ import kotlinx.coroutines.flow.StateFlow
 import java.io.File
 
 /**
- * Headless debugger for user-compiled C/C++ code. Wraps lldb-server
- * gdbserver over a localhost GDB-remote connection and exposes an MVI-
- * friendly API: state is observed via [state], commands are suspend
- * functions that return once the target has acknowledged.
+ * Headless debugger for user-compiled C/C++ code. Drives lldb via the
+ * Debug Adapter Protocol (DAP) and exposes an MVI-friendly API: state
+ * is observed via [state], commands are suspend functions that return
+ * once the target has acknowledged.
  *
  * Threading: every method is `suspend` and is safe to call from any
  * dispatcher. Implementations serialise protocol access internally.
  *
- * Phase 1 scope: start / step / cont / pause / stop. No breakpoints,
- * no source-line mapping, no variables.
+ * Feature set: start, source-line breakpoints (verified + unverified),
+ * step over/into/out (frame-aware, not instruction-level), continue,
+ * pause, stop, call stack, scopes, variable inspection.
  */
 interface DebuggerService {
 
@@ -38,40 +39,69 @@ interface DebuggerService {
     val output: SharedFlow<String>
 
     /**
-     * Launch `trampoline` under lldb-server gdbserver with [userLibrary]
-     * as the `.so` to dlopen. On success the target is stopped at the
-     * trampoline's entry (inside ld-android.so, before main). The user
-     * can then step or continue.
+     * Launch [trampolineBinary] under lldb-dap with [userLibrary] as
+     * the `.so` to dlopen. On success the target runs until it hits
+     * the user's wrapped `main` (we set a pending breakpoint on
+     * `user_main_fn`); stops outside the project root are silently
+     * continued past so the user only sees stops inside their own
+     * code.
      *
      * [trampolineBinary] must be the file system path to `libTrampoline.so`
      * (as exec'd via the jniLibs name trick). [userLibrary] must be a
-     * .so exporting the `run_user_main(argc, argv, out_fd, err_fd)`
-     * extern "C" symbol — i.e. the product of the normal Run build with
-     * the runtime shim.
+     * `.so` exporting `run_user_main(argc, argv, out_fd, err_fd)` —
+     * i.e. the product of the normal Run build with the runtime shim
+     * and `-g -O0 -gz=none`. [projectRoot] is the directory whose
+     * descendants count as "user code"; stops in any frame whose
+     * source file is outside this directory are auto-continued.
      */
-    suspend fun start(trampolineBinary: File, userLibrary: File): Result<Unit>
+    suspend fun start(
+        trampolineBinary: File,
+        userLibrary: File,
+        projectRoot: File,
+    ): Result<Unit>
 
     /**
-     * Toggle a source-line breakpoint. Adds it to [breakpoints] if not
-     * present, removes if present. If the debugger is running, sends
-     * the matching `$Z0` / `$z0` packet and updates the entry's
-     * verification state. If the debugger is idle, the breakpoint is
-     * recorded and will be applied at the start of the next session.
+     * Toggle a source-line breakpoint. Adds to [breakpoints] if not
+     * present, removes if present. If a session is active, the full
+     * set of breakpoints for the affected file is re-sent via DAP
+     * `setBreakpoints` and each entry's `verified` flag is updated
+     * from the response. If idle, the breakpoint is recorded and
+     * applied at the start of the next session.
      */
     suspend fun toggleBreakpoint(file: String, line: Int)
 
-    /** Remove all breakpoints. Fires off $z0 for each live one. */
+    /** Remove all breakpoints. If a session is active, clears lldb-side too. */
     suspend fun clearBreakpoints()
 
-    /** Single-step one instruction on the current thread. Target must be stopped. */
-    suspend fun stepInstruction()
+    /** Step over the current source line. Target must be stopped. */
+    suspend fun stepOver()
+
+    /** Step into a called function on the current source line. */
+    suspend fun stepInto()
+
+    /** Run until the current stack frame returns. */
+    suspend fun stepOut()
 
     /** Continue execution until next stop (breakpoint, signal, or exit). */
     suspend fun cont()
 
-    /** Send an async interrupt (Ctrl-C equivalent) while the target is running. */
+    /** Send an async interrupt while the target is running. */
     suspend fun pause()
 
-    /** Kill the inferior and tear down lldb-server. Idempotent. */
+    /**
+     * Fetch the variable scopes (Locals, Arguments, Globals, Registers)
+     * for a stack frame. Use [StackFrame.id] from the current
+     * [DebuggerState.Stopped.callStack].
+     */
+    suspend fun fetchScopes(frameId: Int): Result<List<Scope>>
+
+    /**
+     * Fetch the variables for a [Scope.variablesReference] or a
+     * structured [Variable.variablesReference]. Recurse on demand
+     * as the UI expands tree rows.
+     */
+    suspend fun fetchVariables(variablesReference: Int): Result<List<Variable>>
+
+    /** Kill the inferior and tear down lldb-dap. Idempotent. */
     suspend fun stop()
 }

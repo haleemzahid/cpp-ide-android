@@ -33,16 +33,30 @@ sealed class DebuggerState {
     data class Starting(val stage: String) : DebuggerState()
     data class Running(val pid: Int) : DebuggerState()
     data class Stopped(
+        /**
+         * Best-effort process id. DAP doesn't guarantee one, so this
+         * may be 0 — the field is kept for compatibility with the old
+         * UI; do not use it for lifecycle decisions.
+         */
         val pid: Int,
-        val pc: Long,
         val reason: StopReason,
-        val signal: Int,
-        val threadId: String,
-        /** Resolved source location for [pc] via DWARF line info, or null
-         *  if the PC is outside any known compilation unit (e.g. stopped
-         *  inside ld-android.so or libc). */
+        /** DAP-side thread id (not OS tid). Used to re-issue continue/step. */
+        val threadId: Int,
+        /**
+         * Top-of-stack source location, pulled from the first frame in
+         * [callStack]. Null when no debug info is available (e.g. stopped
+         * inside libc or the loader).
+         */
         val sourceFile: String? = null,
         val sourceLine: Int? = null,
+        /** Full call stack, newest frame first. Empty if unavailable. */
+        val callStack: List<StackFrame> = emptyList(),
+        /**
+         * Raw stop description from DAP's `stopped` event (e.g.
+         * "breakpoint hit", "step completed", "signal SIGSEGV"). Shown
+         * verbatim in the debug panel header.
+         */
+        val description: String? = null,
     ) : DebuggerState()
     data class Exited(val code: Int, val signaled: Boolean) : DebuggerState()
     data class Failed(val message: String) : DebuggerState()
@@ -52,17 +66,18 @@ sealed class DebuggerState {
 }
 
 /**
- * Canonical stop reasons from lldb's `T` packet `reason:` key. Mapped
- * from the strings lldb-server sends: `breakpoint`, `trace`, `trap`,
- * `signal`, `watchpoint`, `exception`. Anything else falls back to
- * [UNKNOWN] — we log the raw string in that case.
+ * Canonical stop reasons. Mapped from DAP's `stopped` event `reason`
+ * field, which lldb-dap populates with one of: "breakpoint", "step",
+ * "pause", "signal", "exception", "data breakpoint", "exited", or an
+ * adapter-specific string. Anything unrecognized becomes [UNKNOWN];
+ * the raw string lives in DebuggerState.Stopped.description.
  */
 enum class StopReason {
     BREAKPOINT,
-    TRACE,          // single-step completed
-    TRAP,           // user interrupt (we sent Ctrl-C)
-    SIGNAL,         // target received a real signal (SIGSEGV etc.)
-    WATCHPOINT,
+    STEP,           // step over/into/out completed
+    PAUSE,          // user-initiated interrupt
+    SIGNAL,         // target received a signal (SIGSEGV, etc.)
     EXCEPTION,
+    ENTRY,          // stopped at program entry (stopOnEntry)
     UNKNOWN,
 }

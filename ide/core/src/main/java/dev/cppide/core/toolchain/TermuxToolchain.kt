@@ -145,6 +145,7 @@ class TermuxToolchain(
         val ldTarget = File(nativeLibDir, "libld.so").absolutePath
         val clangdTarget = File(nativeLibDir, "libclangd.so").absolutePath
         val lldbServerTarget = File(nativeLibDir, "libLLDBServer.so").absolutePath
+        val lldbDapTarget = File(nativeLibDir, "libLLDBDAP.so").absolutePath
 
         var created = 0
         fun linkIfStale(target: String, name: String) {
@@ -163,6 +164,7 @@ class TermuxToolchain(
         LD_ALIASES.forEach { linkIfStale(ldTarget, it) }
         linkIfStale(clangdTarget, "clangd")
         linkIfStale(lldbServerTarget, "lldb-server")
+        linkIfStale(lldbDapTarget, "lldb-dap")
         return created
     }
 
@@ -172,6 +174,7 @@ class TermuxToolchain(
         ld = File(binDir, "ld"),
         clangd = File(binDir, "clangd"),
         lldbServer = File(binDir, "lldb-server"),
+        lldbDap = File(binDir, "lldb-dap"),
         sysroot = sysroot,
         resourceDir = resourceDir,
         nativeLibDir = nativeLibDir,
@@ -191,7 +194,9 @@ class TermuxToolchain(
         // v3: added liblzma.so.5 for lldb-server.
         // v4: libLLVM.so deduped out of termux.zip (now lives only in jniLibs/);
         //     sanitizer archives trimmed to builtins + asan + ubsan.
-        private const val MARKER_VERSION = 4
+        // v5: added liblldb.so, libpython3.13.so + stdlib, lldb Python bindings,
+        //     libicu*, openssl, ncurses, libedit, libxml2 for lldb-dap.
+        private const val MARKER_VERSION = 5
         private const val CLANG_RESOURCE_VERSION = "21"
 
         private val CLANG_ALIASES = listOf(

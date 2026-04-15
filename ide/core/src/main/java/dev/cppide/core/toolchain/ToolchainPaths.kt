@@ -23,6 +23,9 @@ data class ToolchainPaths(
     /** Symlink: filesDir/termux/bin/lldb-server → nativeLibraryDir/libLLDBServer.so */
     val lldbServer: File,
 
+    /** Symlink: filesDir/termux/bin/lldb-dap → nativeLibraryDir/libLLDBDAP.so */
+    val lldbDap: File,
+
     /** filesDir/termux/sysroot — clang passes this via --sysroot= */
     val sysroot: File,
 
@@ -41,11 +44,27 @@ data class ToolchainPaths(
     /** filesDir/termux — root of the extracted Termux tree */
     val termuxRoot: File,
 ) {
-    /** Environment map for spawning any toolchain subprocess (clang, clangd, lldb). */
+    /**
+     * Environment map for spawning any toolchain subprocess (clang, clangd, lldb).
+     *
+     * `PYTHONHOME` points at termuxRoot so that `liblldb.so`'s Py_Initialize()
+     * finds the stdlib at `termuxRoot/lib/python3.13/`. Without it, Python init
+     * aborts (because the compiled-in prefix `/data/data/com.termux/...` doesn't
+     * exist in our app sandbox) and lldb-dap crashes on startup.
+     *
+     * `PYTHONDONTWRITEBYTECODE` keeps Python from writing .pyc files into
+     * termux.zip's extracted tree — they'd clutter filesDir with no benefit.
+     *
+     * These vars are harmless for non-Python toolchain tools (clang, lld, etc.),
+     * so we set them unconditionally rather than splitting the env map.
+     */
     fun processEnv(workingDir: File): Map<String, String> = mapOf(
         "PATH" to binDir.absolutePath,
         "LD_LIBRARY_PATH" to "${nativeLibDir.absolutePath}:${termuxLibDir.absolutePath}",
         "HOME" to workingDir.absolutePath,
         "TMPDIR" to workingDir.absolutePath,
+        "PYTHONHOME" to termuxRoot.absolutePath,
+        "PYTHONPATH" to "${termuxLibDir.absolutePath}/python3.13/site-packages",
+        "PYTHONDONTWRITEBYTECODE" to "1",
     )
 }
