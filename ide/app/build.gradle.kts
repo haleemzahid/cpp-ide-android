@@ -43,8 +43,8 @@ android {
         applicationId = "dev.cppide.ide"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1"
+        versionCode = 2
+        versionName = "0.2"
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
@@ -52,6 +52,14 @@ android {
         // compose — saves ~1-2MB of per-locale .xml from transitive deps.
         resourceConfigurations += listOf("en")
     }
+
+    // Termux toolchain (~60 MB termux.zip) lives in a separate
+    // install-time asset pack so the base APK stays under Google
+    // Play's 150 MB limit. Install-time packs are delivered as
+    // split APKs alongside the base; their assets merge into the
+    // standard asset namespace so context.assets.open("termux.zip")
+    // continues to work without code changes.
+    assetPacks += listOf(":toolchain-pack")
 
     buildTypes {
         debug {
