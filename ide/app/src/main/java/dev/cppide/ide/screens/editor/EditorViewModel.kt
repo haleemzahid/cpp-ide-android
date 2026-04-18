@@ -9,6 +9,7 @@ import dev.cppide.core.build.BuildResult
 import dev.cppide.core.build.Diagnostic
 import dev.cppide.core.debug.DebuggerState
 import dev.cppide.core.lsp.LspCompletion
+import org.eclipse.lsp4j.SemanticTokenTypes
 import dev.cppide.core.project.Project
 import dev.cppide.core.run.RunConfig
 import dev.cppide.core.run.RunEvent
@@ -18,6 +19,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
@@ -143,6 +147,7 @@ class EditorViewModel(
                             autoOpenStoppedFile(file)
                         }
                         refreshVariablesForTopFrame(dbg)
+                        refreshInlineDebugValues(dbg)
                     }
                     is DebuggerState.Running -> {
                         _state.update {
@@ -150,13 +155,18 @@ class EditorViewModel(
                                 debugScopes = emptyList(),
                                 debugVariables = emptyMap(),
                                 expandedVariableRefs = emptySet(),
+                                inlineDebugValues = emptyMap(),
                             )
                         }
                     }
-                    is DebuggerState.Exited ->
+                    is DebuggerState.Exited -> {
                         appendInfo("■ debug session exited (code=${dbg.code}${if (dbg.signaled) ", signaled" else ""})")
-                    is DebuggerState.Failed ->
+                        _state.update { it.copy(inlineDebugValues = emptyMap()) }
+                    }
+                    is DebuggerState.Failed -> {
                         appendError("debug failed: ${dbg.message}")
+                        _state.update { it.copy(inlineDebugValues = emptyMap()) }
+                    }
                     is DebuggerState.Starting,
                     DebuggerState.Idle -> Unit
                 }
@@ -512,6 +522,109 @@ class EditorViewModel(
                 }
             }
         }
+    }
+
+    /**
+     * Compute inline variable values for the file the debugger just
+     * stopped in, and publish them under [EditorState.inlineDebugValues].
+     *
+     * The value of this feature is that the user sees, without ever
+     * opening a side panel, the current value of each local/argument
+     * exactly where it's used in the source — VSCode-style. Doing it
+     * right (no false matches on comments/strings/keywords) requires
+     * cooperation between clangd (identifier locations via semantic
+     * tokens) and lldb (current values via DAP). This method glues
+     * the two together:
+     *
+     *   1. fetch every cheap scope for the top frame (Locals, Args, …)
+     *      and merge their variables into a single name → value map;
+     *   2. fetch semantic tokens for a window around the stopped line
+     *      so we avoid paying for a whole-file scan on tight step loops;
+     *   3. for each token of kind `variable`/`parameter`, slice the
+     *      source to get the identifier text, and if it matches a
+     *      variable name in the scope, bucket it under its source line.
+     *
+     * Expensive scopes (Globals, Registers) are skipped — they'd bloat
+     * the map without matching local-variable naming conventions anyway.
+     * If any step can't complete (clangd not ready, file not resolvable,
+     * no tokens returned), we quietly publish nothing; the user simply
+     * sees no inline annotations, which is better than guessing.
+     */
+    private fun refreshInlineDebugValues(stopped: DebuggerState.Stopped) {
+        val absPath = stopped.sourceFile ?: return
+        val centerLine = stopped.sourceLine ?: return
+        val topFrameId = stopped.callStack.firstOrNull()?.id ?: return
+
+        viewModelScope.launch {
+            val scopes = core.debuggerService.fetchScopes(topFrameId).getOrNull() ?: return@launch
+            // lldb-dap ships Globals/Registers with expensive=false just
+            // like Locals, so we can't rely on the protocol flag alone.
+            val localsScopes = scopes.filter {
+                val n = it.name.lowercase()
+                (n == "locals" || n == "arguments" || n == "local") &&
+                    it.variablesReference != 0
+            }
+            // Fetch each cheap scope's variables in parallel — two
+            // serial DAP round-trips per step adds up across a stepping
+            // session.
+            val fetched = coroutineScope {
+                localsScopes.map { scope ->
+                    async { core.debuggerService.fetchVariables(scope.variablesReference).getOrNull() }
+                }.awaitAll()
+            }
+            val varsByName = linkedMapOf<String, String>()
+            for (vars in fetched) {
+                if (vars == null) continue
+                for (v in vars) varsByName[v.name] = v.value
+            }
+            if (varsByName.isEmpty()) return@launch
+
+            val content = readSourceContent(absPath) ?: return@launch
+            val sourceLines = content.split('\n')
+            val totalLines = sourceLines.size
+            if (totalLines == 0) return@launch
+
+            val centerZero = (centerLine - 1).coerceIn(0, totalLines - 1)
+            val windowStart = (centerZero - 60).coerceAtLeast(0)
+            val windowEnd = (centerZero + 60).coerceAtMost(totalLines - 1)
+
+            val tokens = core.lspService.semanticTokensRange(
+                java.io.File(absPath), windowStart, windowEnd,
+            )
+            if (tokens.isEmpty()) return@launch
+
+            val byLine = linkedMapOf<Int, LinkedHashMap<String, String>>()
+            for (t in tokens) {
+                if (t.type != SemanticTokenTypes.Variable &&
+                    t.type != SemanticTokenTypes.Parameter) continue
+                val src = sourceLines.getOrNull(t.line) ?: continue
+                val end = t.startChar + t.length
+                if (t.startChar < 0 || end > src.length) continue
+                val name = src.substring(t.startChar, end)
+                val value = varsByName[name] ?: continue
+                val bucket = byLine.getOrPut(t.line + 1) { linkedMapOf() }
+                bucket[name] = value
+            }
+            Log.i(TAG, "inline: matched ${byLine.size} lines -> ${byLine.keys}")
+            val result: Map<Int, List<InlineDebugValue>> = byLine.mapValues { (_, m) ->
+                m.map { (n, v) -> InlineDebugValue(n, v) }
+            }
+
+            _state.update { it.copy(inlineDebugValues = mapOf(absPath to result)) }
+        }
+    }
+
+    /**
+     * Return the current content of [absPath] with the editor's live
+     * unsaved buffer preferred over the on-disk copy. Returns null if
+     * the path is unreadable (stopped inside libc, vdso, etc.).
+     */
+    private fun readSourceContent(absPath: String): String? {
+        val open = _state.value.openTabs.firstOrNull { tab ->
+            activeFileAbsPath(tab.relativePath) == absPath
+        }
+        if (open != null) return open.content
+        return runCatching { java.io.File(absPath).readText() }.getOrNull()
     }
 
     /**
@@ -981,6 +1094,12 @@ class EditorViewModel(
                 bottomPanelVisible = true,
                 bottomPanelTab = BottomPanelTab.Terminal,
                 problems = emptyList(),
+                // Start each Run with a fresh terminal. Otherwise the
+                // previous session's output (including a partial prompt
+                // with no trailing '\n') leaks into the new session and
+                // the input field appears before any new output has
+                // been emitted.
+                terminalLines = emptyList(),
             ) }
             appendInfo("Building ${openFile.name}…")
 
@@ -1103,11 +1222,14 @@ class EditorViewModel(
 
             // Open the terminal panel immediately so the FAB hides
             // through the toolchain install + build phase instead of
-            // lingering visibly while work happens off-screen.
+            // lingering visibly while work happens off-screen. Also
+            // reset the terminal buffer so the previous session's
+            // output isn't mistaken for output from this debug run.
             _state.update {
                 it.copy(
                     bottomPanelVisible = true,
                     bottomPanelTab = BottomPanelTab.Terminal,
+                    terminalLines = emptyList(),
                 )
             }
 
@@ -1233,11 +1355,57 @@ class EditorViewModel(
 
     // ---- terminal append helpers ----
 
-    private fun appendStdout(text: String) = _state.update {
-        it.copy(terminalLines = it.terminalLines + TerminalLine.Stdout(text))
-    }
-    private fun appendStderr(text: String) = _state.update {
-        it.copy(terminalLines = it.terminalLines + TerminalLine.Stderr(text))
+    private fun appendStdout(text: String) = appendTerminal { TerminalLine.Stdout(it) }(text)
+
+    private fun appendStderr(text: String) = appendTerminal { TerminalLine.Stderr(it) }(text)
+
+    /**
+     * Append [text] to [EditorState.terminalLines] under the line type
+     * produced by [wrap], coalescing with the previous entry when they
+     * form a continuation of the same logical output line.
+     *
+     * Why coalesce: `runtime_shim.cpp` sets the inferior's stdout to
+     * `_IONBF` so `cout << "prompt: "` (no '\n') appears immediately
+     * before the next `cin >>`. The side-effect is that every `<<`
+     * operator becomes its own pipe write: `cout << a << b` emits two
+     * chunks ("ghh", "hhj") which get appended as two `TerminalLine`
+     * entries, then render on two visually separate lines — not the
+     * single concatenated line the user wrote. Merging back-to-back
+     * chunks of the same kind when the previous one didn't terminate
+     * with '\n' restores the expected display without giving up the
+     * prompt-immediacy of unbuffered stdout.
+     *
+     * Cross-kind chunks (stdout → stderr or stdout → info) never merge
+     * because they need to keep their distinct colors.
+     */
+    private fun appendTerminal(wrap: (String) -> TerminalLine): (String) -> Unit = { text ->
+        _state.update { state ->
+            val lines = state.terminalLines
+            val prev = lines.lastOrNull()
+            val incoming = wrap(text)
+            val merged = if (
+                prev != null &&
+                prev.javaClass == incoming.javaClass &&
+                !prev.text.endsWith('\n')
+            ) {
+                // Same line type, previous didn't end in '\n' — extend
+                // it rather than starting a new entry.
+                lines.subList(0, lines.size - 1) + wrap(prev.text + text)
+            } else {
+                lines + incoming
+            }
+            // Cap total entries to bound memory for long-running programs
+            // (e.g. a `while(true) cout`). Drop from the head so the most
+            // recent output stays visible; the build-up cost is still
+            // O(n) per chunk from the immutable-list copy, but a cap keeps
+            // n bounded so the worst case is predictable.
+            val bounded = if (merged.size > MAX_TERMINAL_LINES) {
+                merged.subList(merged.size - MAX_TERMINAL_LINES, merged.size)
+            } else {
+                merged
+            }
+            state.copy(terminalLines = bounded)
+        }
     }
     private fun appendInfo(text: String) = _state.update {
         it.copy(terminalLines = it.terminalLines + TerminalLine.Info(text))
@@ -1277,6 +1445,11 @@ class EditorViewModel(
 
     companion object {
         private const val TAG = "cppide-editor"
+        /** Upper bound on retained terminal lines — a runaway program
+         *  still gets its recent output rendered, but we stop growing
+         *  the list (and therefore the per-chunk copy cost) past this
+         *  point. */
+        private const val MAX_TERMINAL_LINES = 5000
         /** How long after the last keystroke to auto-save. */
         private const val AUTO_SAVE_DELAY_MS = 1_000L
         /** How long after the last keystroke to push didChange to clangd. */

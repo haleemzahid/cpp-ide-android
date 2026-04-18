@@ -59,6 +59,18 @@ import dev.cppide.ide.theme.CppIde
 fun TerminalView(
     lines: List<TerminalLine>,
     inputEnabled: Boolean,
+    /**
+     * Whether the terminal is allowed to pop the soft keyboard on its
+     * own when a partial prompt appears. Passed `false` while the
+     * debugger is paused (`Stopped`) — the partial prompt visible on
+     * screen is a side-effect of the user having *stepped over* the
+     * `cout` that wrote it, but the program isn't actually blocked on
+     * stdin yet. Auto-showing the keyboard there is confusing: the
+     * user sees the IME pop, hasn't asked to type anything, and has
+     * to dismiss it before continuing to step. Manual tap on the
+     * terminal still opens the keyboard regardless.
+     */
+    autoShowKeyboard: Boolean,
     onSendInput: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -75,21 +87,33 @@ fun TerminalView(
     // lands right after it.
     val split = remember(lines) { splitCompletedAndPartial(lines) }
 
-    // Show the input only when the program is waiting for it. Heuristic:
-    // the last output didn't end in '\n', so it's a `cout << "prompt: "`
-    // style prompt. This keeps the field hidden while the program is just
-    // running (Run) or stepping through code (Debug) — it pops in right
-    // as the prompt appears and goes away once the user submits.
-    val showInput = inputEnabled && split.partial != null
+    // Show the input field whenever the program is accepting input.
+    //
+    // We used to gate this on "a partial prompt is visible" (i.e. the
+    // last output didn't end in '\n'), on the theory that the field
+    // should only appear when the program is *actually* waiting for
+    // something. That heuristic broke two back-to-back `cin`s with no
+    // intervening `cout`: we echo the user's submitted line back into
+    // the terminal as "5\n", which terminates the partial, so the
+    // field disappeared — and nothing on the second `cin` brought it
+    // back, because the second cin produces no new stdout. Always-on
+    // while `inputEnabled` is the simplest correct rule; during a
+    // compute-only phase the cursor just sits idle at the bottom.
+    val showInput = inputEnabled
 
-    // Auto-focus + show IME when the prompt first appears; clear the
-    // buffer when the run ends.
-    LaunchedEffect(showInput, inputEnabled) {
-        if (showInput) {
+    // Auto-focus + show IME when input opens AND the caller has opted
+    // in to auto-show. When input is disabled (e.g. the debugger just
+    // hit a breakpoint), actively hide the IME so a keyboard opened a
+    // moment earlier by a brief Running window during a step doesn't
+    // linger over a now-inert input field. Clear the pending buffer
+    // on disable too so stale text doesn't persist to the next run.
+    LaunchedEffect(showInput, inputEnabled, autoShowKeyboard) {
+        if (showInput && autoShowKeyboard) {
             focusRequester.requestFocus()
             keyboard?.show()
         }
         if (!inputEnabled) {
+            keyboard?.hide()
             pending = TextFieldValue("")
         }
     }
@@ -98,19 +122,40 @@ fun TerminalView(
         scrollState.scrollTo(scrollState.maxValue)
     }
 
-    // Output block: always includes completed lines. When the input field
-    // is hidden but there's a partial (e.g. during stepping before the
-    // user has typed), append the partial inline so it stays visible.
+    // Output block: always includes completed lines. When the input
+    // field is hidden but there's a partial (e.g. during stepping
+    // before the user has typed), append the partial inline so it
+    // stays visible.
+    //
+    // Newline handling: each completed line is separated from the next
+    // by exactly one '\n'. If a source line already ends in '\n' we
+    // don't add another; if it doesn't, we insert one. Crucially, we
+    // *don't* leave a trailing '\n' on the final character of the
+    // rendered block — that would render as a visible empty line below
+    // the last output, pushing the input field one row further down
+    // and producing the "empty line between last value and cursor"
+    // the user reported.
     val outputAnnotated = remember(split, colors, showInput) {
         buildAnnotatedString {
-            split.completed.forEach { line ->
+            val last = split.completed.lastIndex
+            split.completed.forEachIndexed { idx, line ->
                 withStyle(SpanStyle(color = line.color(colors))) {
-                    append(line.text)
-                    if (!line.text.endsWith('\n')) append('\n')
+                    val text = line.text
+                    if (idx == last) {
+                        // Drop at most one trailing '\n' on the final
+                        // line so the Text block doesn't end with a
+                        // blank row before the input field.
+                        if (text.endsWith('\n')) append(text.dropLast(1))
+                        else append(text)
+                    } else {
+                        append(text)
+                        if (!text.endsWith('\n')) append('\n')
+                    }
                 }
             }
             if (!showInput && split.partial != null) {
                 val p = split.partial
+                if (split.completed.isNotEmpty()) append('\n')
                 withStyle(SpanStyle(color = p.color(colors))) { append(p.text) }
             }
         }
@@ -158,6 +203,16 @@ fun TerminalView(
                 val rest = text.substring(nl + 1)
                 pending = TextFieldValue(rest, TextRange(rest.length))
                 onSendInput(submit)
+                // A second `cin` right after this one won't change
+                // `showInput` (the partial prompt is still non-null), so
+                // the LaunchedEffect above won't re-fire. If the IME
+                // auto-hid on Enter, the user would be stuck looking at
+                // a dead-looking terminal. Proactively re-request focus
+                // so the keyboard stays available for the next line.
+                if (autoShowKeyboard) {
+                    focusRequester.requestFocus()
+                    keyboard?.show()
+                }
             },
             enabled = inputEnabled,
             singleLine = false,
@@ -171,6 +226,10 @@ fun TerminalView(
                     val text = pending.text
                     pending = TextFieldValue("")
                     onSendInput(text)
+                    if (autoShowKeyboard) {
+                        focusRequester.requestFocus()
+                        keyboard?.show()
+                    }
                 },
             ),
             visualTransformation = PartialPrefixTransformation(

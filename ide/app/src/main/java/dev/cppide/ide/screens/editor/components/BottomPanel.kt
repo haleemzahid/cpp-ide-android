@@ -34,6 +34,10 @@ fun BottomPanel(
     isCppFile: Boolean,
     /** True while a program is running — enables the stdin input row. */
     isRunning: Boolean,
+    /** True when the terminal may auto-pop the IME on a partial prompt.
+     *  False while the debugger is paused: the prompt on screen is
+     *  carry-over from an already-executed cout, not a live stdin block. */
+    autoShowKeyboard: Boolean,
     onSelectTab: (BottomPanelTab) -> Unit,
     onClose: () -> Unit,
     onClearTerminal: () -> Unit,
@@ -71,6 +75,7 @@ fun BottomPanel(
                 BottomPanelTab.Terminal -> TerminalView(
                     lines = terminalLines,
                     inputEnabled = isRunning,
+                    autoShowKeyboard = autoShowKeyboard,
                     onSendInput = onSendTerminalInput,
                 )
                 BottomPanelTab.Problems -> ProblemsList(

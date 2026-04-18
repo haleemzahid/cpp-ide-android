@@ -50,4 +50,14 @@ interface LspService {
 
     /** Hover info at a position, or null. */
     suspend fun hover(file: File, line: Int, character: Int): String?
+
+    /**
+     * Semantic tokens in [startLine, endLine] (both 0-indexed, inclusive),
+     * decoded into plain absolute positions. Empty list when clangd isn't
+     * ready, doesn't advertise semantic tokens, or returns nothing.
+     * Used by the debugger to place inline variable values at the right
+     * identifier occurrences without false-positive regex matches on
+     * keywords / string contents / comments.
+     */
+    suspend fun semanticTokensRange(file: File, startLine: Int, endLine: Int): List<LspToken>
 }

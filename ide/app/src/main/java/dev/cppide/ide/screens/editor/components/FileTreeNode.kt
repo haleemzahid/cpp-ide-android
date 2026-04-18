@@ -9,6 +9,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Delete
@@ -115,11 +118,24 @@ private fun FileRow(
     val dimens = CppIde.dimens
     val bg = if (isActive) colors.editorSelection else Color.Transparent
 
+    // When the active file's row first composes, scroll it into view so
+    // the user doesn't have to hunt for it in a large tree. The drawer
+    // is destroyed and re-created each time it opens (it's mounted
+    // conditionally in EditorScreen), so `LaunchedEffect(Unit)` fires
+    // on every open — which is exactly the cadence we want.
+    val bringIntoView = remember { BringIntoViewRequester() }
+    if (isActive) {
+        LaunchedEffect(Unit) {
+            bringIntoView.bringIntoView()
+        }
+    }
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(min = TreeRowMinHeight)
             .background(bg)
+            .bringIntoViewRequester(bringIntoView)
             .clickable(onClick = onClick)
             .padding(start = indent + dimens.spacingS, end = dimens.spacingXs),
         verticalAlignment = Alignment.CenterVertically,
@@ -176,8 +192,21 @@ private fun DirectoryRow(
     val colors = CppIde.colors
     val dimens = CppIde.dimens
 
-    // Top-level directory (the project root) is always expanded.
-    var expanded by remember(node.relativePath) { mutableStateOf(depth == 0) }
+    // A directory starts expanded when one of the following is true:
+    //   - it's the project root (depth 0), which we never want collapsed;
+    //   - the active file lives somewhere under it, so opening the
+    //     drawer reveals the file directly instead of making the user
+    //     drill down to find it.
+    // The check uses the `${path}/` suffix to avoid a false positive
+    // where `activePath = "foo_bar/main.cpp"` would otherwise be
+    // considered "under" a `foo/` directory by a plain startsWith.
+    val isAncestorOfActive = activePath != null && run {
+        val prefix = if (node.relativePath.isEmpty()) "" else "${node.relativePath}/"
+        activePath.startsWith(prefix) && activePath != node.relativePath
+    }
+    var expanded by remember(node.relativePath, isAncestorOfActive) {
+        mutableStateOf(depth == 0 || isAncestorOfActive)
+    }
     val isSelectedParent = selectedFolder == node.relativePath
     val bg = if (isSelectedParent) colors.editorSelection else Color.Transparent
 

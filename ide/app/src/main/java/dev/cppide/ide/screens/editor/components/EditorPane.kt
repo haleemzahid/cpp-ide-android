@@ -60,6 +60,9 @@ fun EditorPane(
     fileId: String,
     initialContent: String,
     onContentChange: (String) -> Unit,
+    /** Called whenever sora's undo/redo availability changes, so the
+     *  top bar can dim the buttons when the stacks are empty. */
+    onHistoryChange: (canUndo: Boolean, canRedo: Boolean) -> Unit,
     onRequestCompletion: suspend (liveContent: String, line: Int, column: Int) -> List<LspCompletion>,
     onToggleBreakpoint: (line: Int) -> Unit,
     onControllerReady: (EditorController) -> Unit,
@@ -70,6 +73,15 @@ fun EditorPane(
      *  stopped inside this file. The editor highlights the line and
      *  scrolls to it. */
     currentLine: Int? = null,
+    /** Disables text input + selection edits while true. The debugger
+     *  locks the source while paused on a breakpoint to match VSCode
+     *  behavior — a stop is for inspecting state, not typing into the
+     *  file the program is frozen inside of. */
+    readOnly: Boolean = false,
+    /** 1-indexed source line → debug values to paint at end-of-line while
+     *  the debugger is stopped. Empty when not stopped or the current
+     *  file isn't the stopped one. */
+    inlineDebugValues: Map<Int, List<dev.cppide.ide.screens.editor.InlineDebugValue>> = emptyMap(),
     /** clangd diagnostics for the currently open file. Rendered as squiggle
      *  underlines under the offending text, with Sora's built-in diagnostic
      *  tooltip window picking them up on cursor hover. */
@@ -84,6 +96,7 @@ fun EditorPane(
     val callback = rememberUpdatedState(onContentChange)
     val completionCallback = rememberUpdatedState(onRequestCompletion)
     val breakpointCallback = rememberUpdatedState(onToggleBreakpoint)
+    val historyCallback = rememberUpdatedState(onHistoryChange)
 
     // Live reference to the editor. DebugCodeEditor paints the current
     // execution line and breakpoint gutter markers inside its own
@@ -151,9 +164,13 @@ fun EditorPane(
                         // Initial content. Set once; the editor owns it from here.
                         setText(initialContent)
 
-                        // Forward edits to Compose state.
+                        // Forward edits to Compose state, and surface the
+                        // updated undo/redo availability so the top-bar
+                        // buttons can dim the moment the history stacks
+                        // are exhausted (or refreshed on an undo).
                         subscribeAlways(ContentChangeEvent::class.java) { _ ->
                             callback.value(text.toString())
+                            historyCallback.value(canUndo(), canRedo())
                         }
 
                         // Tap on the line-number gutter → toggle breakpoint.
@@ -172,9 +189,16 @@ fun EditorPane(
                         // configured. The top bar uses this to drive undo/
                         // redo without the screen knowing sora's API.
                         onControllerReady(object : EditorController {
-                            override fun undo() { this@apply.undo() }
-                            override fun redo() { this@apply.redo() }
+                            override fun undo() {
+                                this@apply.undo()
+                                historyCallback.value(canUndo(), canRedo())
+                            }
+                            override fun redo() {
+                                this@apply.redo()
+                                historyCallback.value(canUndo(), canRedo())
+                            }
                         })
+                        historyCallback.value(canUndo(), canRedo())
                         editorRef = this@apply
                     }
                 },
@@ -183,7 +207,9 @@ fun EditorPane(
                 // on state change. When the current execution line moves
                 // to a new value, center it in the viewport too.
                 update = { editor ->
+                    editor.isEditable = !readOnly
                     editor.breakpointLines = breakpointLines
+                    editor.inlineDebugValues = inlineDebugValues
                     val prev = editor.currentExecutionLine
                     editor.currentExecutionLine = currentLine
                     if (currentLine != null && currentLine != prev) {

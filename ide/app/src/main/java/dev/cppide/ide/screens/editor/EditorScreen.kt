@@ -82,6 +82,8 @@ fun EditorScreen(
     val dimens = CppIde.dimens
 
     var controller by remember { mutableStateOf<EditorController?>(null) }
+    var canUndo by remember { mutableStateOf(false) }
+    var canRedo by remember { mutableStateOf(false) }
 
     // Reload chat messages whenever the chat tab is the active bottom
     // panel AND the active source file changes. Keying only on
@@ -130,6 +132,8 @@ fun EditorScreen(
                 activeFileName = state.openFile?.name,
                 isDirty = state.openFile?.isDirty == true,
                 canShare = state.openFile != null,
+                canUndo = canUndo,
+                canRedo = canRedo,
                 isMarkdown = isMarkdown,
                 markdownPreview = state.markdownPreview,
                 onBack = onBack,
@@ -179,6 +183,7 @@ fun EditorScreen(
                         fileId = openFile.relativePath,
                         initialContent = openFile.savedContent,
                         onContentChange = { onIntent(EditorIntent.EditContent(it)) },
+                        onHistoryChange = { u, r -> canUndo = u; canRedo = r },
                         onRequestCompletion = onRequestCompletion,
                         onToggleBreakpoint = { line ->
                             onIntent(EditorIntent.ToggleBreakpoint(line))
@@ -192,6 +197,7 @@ fun EditorScreen(
                                 stopped.sourceFile?.substringAfterLast('/')
                                     ?.substringAfterLast('\\') == openBasename
                             }?.sourceLine,
+                        inlineDebugValues = state.inlineDebugValuesForOpenFile,
                         lspDiagnostics = state.lspDiagnostics,
                         modifier = Modifier.fillMaxSize(),
                     )
@@ -240,8 +246,26 @@ fun EditorScreen(
                     expandedVariableRefs = state.expandedVariableRefs,
                     chatState = state.chatState,
                     isCppFile = isCodeFile,
+                    // Accept terminal input only when the program is
+                    // genuinely executing: plain Run, or debug mid-step
+                    // (Starting/Running). Paused (`Stopped`) means the
+                    // inferior is frozen — any keys the user types
+                    // won't reach stdin until they resume, which is
+                    // confusing, so we disable the input row entirely
+                    // during the pause.
                     isRunning = state.runState == RunState.Running ||
-                        state.debuggerState.isActive,
+                        (state.debuggerState.isActive &&
+                            state.debuggerState !is dev.cppide.core.debug.DebuggerState.Stopped),
+                    // Auto-open the IME whenever the program is truly
+                    // executing. This mirrors `isRunning` exactly —
+                    // during a Debug pause (`Stopped`) the input row
+                    // is disabled, and we also actively dismiss the
+                    // keyboard in TerminalView when `inputEnabled`
+                    // flips false, so a brief Running window during
+                    // step-over can't leave a stale IME open.
+                    autoShowKeyboard = state.runState == RunState.Running ||
+                        (state.debuggerState.isActive &&
+                            state.debuggerState !is dev.cppide.core.debug.DebuggerState.Stopped),
                     onSelectTab = { onIntent(EditorIntent.SwitchBottomTab(it)) },
                     onClose = { onIntent(EditorIntent.ToggleBottomPanel) },
                     onClearTerminal = { onIntent(EditorIntent.ClearTerminal) },

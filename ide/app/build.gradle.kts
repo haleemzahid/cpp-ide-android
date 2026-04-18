@@ -53,16 +53,55 @@ android {
         resourceConfigurations += listOf("en")
     }
 
-    // Termux toolchain (~60 MB termux.zip) lives in a separate
-    // install-time asset pack so the release base APK stays under
-    // Google Play's 150 MB limit. For debug builds, `adb install`
-    // doesn't deliver asset packs, so fold the pack's assets into
-    // the debug variant's source sets — otherwise context.assets
-    // .open("termux.zip") throws FileNotFoundException.
+    // Two distribution channels for the app.
+    //
+    //   `sideload` — direct APK download (GitHub Release, adb install,
+    //      browser download). The termux toolchain has to be baked
+    //      into the base APK itself because asset packs are only
+    //      delivered by Play Install-Time / Fast-Follow, not by
+    //      PackageInstaller. Bundles ~60 MB of termux.zip into the
+    //      APK, which pushes the release binary to ~140 MB.
+    //
+    //   `play` — Google Play AAB. Toolchain ships as a separate
+    //      install-time asset pack (`:toolchain-pack`) so the base
+    //      APK stays under Play's 150 MB limit. The base APK does
+    //      NOT include termux.zip for release; it would be dead
+    //      weight since Play delivers the pack.
+    //
+    // Build matrix:
+    //   ./gradlew :app:assembleSideloadRelease   # signed sideload APK
+    //   ./gradlew :app:bundlePlayRelease         # Play Store AAB
+    //   ./gradlew :app:installSideloadDebug      # local dev install
+    flavorDimensions += "distribution"
+    productFlavors {
+        create("sideload") {
+            dimension = "distribution"
+        }
+        create("play") {
+            dimension = "distribution"
+        }
+    }
+
+    // Asset packs are a pure AAB concept — AGP ignores them for APK
+    // (`assemble*`) builds. Declaring the pack always is safe: only
+    // `bundlePlayRelease` and its siblings act on it.
     assetPacks += listOf(":toolchain-pack")
-    sourceSets.getByName("debug").assets.srcDirs(
-        "../toolchain-pack/src/main/assets",
-    )
+
+    // Bundle the toolchain into the APK for every build that won't
+    // be installed from the Play Store:
+    //   - sideload flavor (all its build types): direct download,
+    //     adb install
+    //   - playDebug: Play AAB is AAB-only, so `adb install` of a
+    //     playDebug APK would otherwise ship no compiler and the
+    //     app would fail on first build. playRelease is the sole
+    //     configuration that omits the bundled assets, because Play
+    //     will hydrate them via the asset pack on the user's device.
+    val bundledToolchain = "../toolchain-pack/src/main/assets"
+    sourceSets.getByName("sideload").assets.srcDirs(bundledToolchain)
+    // `playDebug` is a variant-specific source set — AGP creates it
+    // lazily, so use maybeCreate() so evaluation works regardless of
+    // ordering with the `productFlavors { }` block above.
+    sourceSets.maybeCreate("playDebug").assets.srcDirs(bundledToolchain)
 
     buildTypes {
         debug {

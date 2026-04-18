@@ -5,8 +5,10 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.Typeface
 import android.util.AttributeSet
 import android.util.Log
+import dev.cppide.ide.screens.editor.InlineDebugValue
 import io.github.rosemoe.sora.widget.CodeEditor
 
 /**
@@ -73,6 +75,22 @@ class DebugCodeEditor @JvmOverloads constructor(
             }
         }
 
+    /**
+     * VSCode-style inline variable values, keyed by 1-indexed source
+     * line. While the debugger is stopped, each line with entries gets
+     * a muted-italic `= value` annotation after its last column of
+     * text. Entries are expected to already be de-duped per line
+     * (first occurrence wins) because paintbrush order matters less
+     * than readable output.
+     */
+    var inlineDebugValues: Map<Int, List<InlineDebugValue>> = emptyMap()
+        set(value) {
+            if (field != value) {
+                field = value
+                invalidate()
+            }
+        }
+
     // ---- paints (lazy, to avoid allocs in onDraw) ----
 
     private val currentLineFill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -88,6 +106,18 @@ class DebugCodeEditor @JvmOverloads constructor(
     private val bpFilled = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = 0xFFF14C4C.toInt()  // VSCode-style filled red
         style = Paint.Style.FILL
+    }
+
+    /**
+     * Inline variable-value text: muted italic grey-green, close to
+     * VSCode's `editor.inlineValuesForegroundColor`. Text size is
+     * refreshed every draw against the current `rowHeight` so it
+     * tracks zoom — re-allocating on every paint would be wasteful.
+     */
+    private val inlineValuePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xFF808080.toInt()  // neutral medium grey
+        typeface = Typeface.create(Typeface.MONOSPACE, Typeface.ITALIC)
+        isAntiAlias = true
     }
 
     private val arrowPath = Path()
@@ -163,6 +193,36 @@ class DebugCodeEditor @JvmOverloads constructor(
                     canvas.drawCircle(cx, cy, radius, bpFilled)
                 }
             }
+
+            // --- inline variable values ---
+            // One text annotation per (line, entries) pair, rendered
+            // after the last column of actual text so it doesn't
+            // overlap the code itself. We ask the editor for the X
+            // position of the end of the source line (`getOffset`)
+            // rather than measuring the string ourselves — that way
+            // tab expansion, BiDi, and font metrics stay Sora's
+            // problem, and our overlay lines up with whatever the
+            // editor is actually rendering.
+            if (inlineDebugValues.isNotEmpty()) {
+                inlineValuePaint.textSize = row * 0.78f
+                val baselineOffset = row * 0.75f
+                val leftPadding = dp * 12f
+                val totalLines = text.lineCount
+                for ((line, entries) in inlineDebugValues) {
+                    if (line < 1 || entries.isEmpty()) continue
+                    val zeroIdx = line - 1
+                    if (zeroIdx >= totalLines) continue
+                    val top = screenTopOfLine(line)
+                    if (top + row < 0 || top > viewH) continue
+                    // `getOffset` returns layout-space X; subtract
+                    // offsetX to land in the view-screen coords we
+                    // translated into at the top of onDraw.
+                    val lineLength = text.getColumnCount(zeroIdx)
+                    val endX = getOffset(zeroIdx, lineLength) - offsetX + leftPadding
+                    val label = formatInlineLabel(entries)
+                    canvas.drawText(label, endX, top + baselineOffset, inlineValuePaint)
+                }
+            }
         } finally {
             canvas.restoreToCount(saveCount)
         }
@@ -187,16 +247,26 @@ class DebugCodeEditor @JvmOverloads constructor(
         canvas.drawPath(arrowPath, gutterArrowPaint)
     }
 
-    /**
-     * Scrolls the editor so [line] sits roughly in the vertical middle of
-     * the viewport, instead of at the very top. VSCode does this when a
-     * breakpoint hits — keeps enough context visible above the stopped
-     * line that the user can see where they came from.
-     *
-     * Call this from the host after setting [currentExecutionLine].
-     */
+    private fun formatInlineLabel(entries: List<InlineDebugValue>): String {
+        val sb = StringBuilder(" ")
+        for ((i, e) in entries.withIndex()) {
+            if (i > 0) sb.append(", ")
+            sb.append(e.name).append(" = ").append(trimValue(e.value))
+        }
+        return sb.toString()
+    }
+
+    private fun trimValue(raw: String): String {
+        val flat = raw.replace('\n', ' ').replace('\r', ' ')
+        return if (flat.length <= INLINE_VALUE_MAX_CHARS) flat
+        else flat.substring(0, INLINE_VALUE_MAX_CHARS - 1) + "…"
+    }
+
     companion object {
         private const val TAG = "DebugCodeEditor"
+        /** Per-value cap to keep long container/string summaries from
+         *  spilling far off the right edge of the viewport. */
+        private const val INLINE_VALUE_MAX_CHARS = 40
     }
 
     fun scrollToLineCentered(line: Int) {
