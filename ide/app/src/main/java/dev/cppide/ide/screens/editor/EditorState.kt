@@ -143,4 +143,6 @@ data class ChatPanelState(
     val isSending: Boolean = false,
     val isLoading: Boolean = false,
     val unreadCount: Int = 0,
+    /** Last send error for inline display in the chat panel. */
+    val sendError: String? = null,
 )

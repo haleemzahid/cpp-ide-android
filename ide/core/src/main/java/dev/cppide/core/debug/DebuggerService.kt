@@ -1,5 +1,6 @@
 package dev.cppide.core.debug
 
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import java.io.File
@@ -58,6 +59,14 @@ interface DebuggerService {
         trampolineBinary: File,
         userLibrary: File,
         projectRoot: File,
+        /**
+         * Optional stream of user stdin chunks. Routed to the inferior via
+         * a FIFO whose path is passed as `CPPIDE_STDIN_FIFO` in the env;
+         * the trampoline opens it and passes the fd as in_fd to the user's
+         * `run_user_main`. lldb never sees the FIFO — that sidesteps the
+         * broken `process launch -i` / `target.input-path` paths in LLVM 21.
+         */
+        stdin: Flow<String>? = null,
     ): Result<Unit>
 
     /**

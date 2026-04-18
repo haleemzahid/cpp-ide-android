@@ -54,12 +54,15 @@ android {
     }
 
     // Termux toolchain (~60 MB termux.zip) lives in a separate
-    // install-time asset pack so the base APK stays under Google
-    // Play's 150 MB limit. Install-time packs are delivered as
-    // split APKs alongside the base; their assets merge into the
-    // standard asset namespace so context.assets.open("termux.zip")
-    // continues to work without code changes.
+    // install-time asset pack so the release base APK stays under
+    // Google Play's 150 MB limit. For debug builds, `adb install`
+    // doesn't deliver asset packs, so fold the pack's assets into
+    // the debug variant's source sets — otherwise context.assets
+    // .open("termux.zip") throws FileNotFoundException.
     assetPacks += listOf(":toolchain-pack")
+    sourceSets.getByName("debug").assets.srcDirs(
+        "../toolchain-pack/src/main/assets",
+    )
 
     buildTypes {
         debug {
@@ -183,9 +186,15 @@ val buildTrampoline by tasks.registering(Exec::class) {
         "-fPIE",
         "-pie",
         "-Wall",
+        // 16 KB page-size alignment — required by Play Store for target
+        // SDK 35+ since Nov 2025. All bundled Termux prebuilts are already
+        // linked with max-page-size=16384; the trampoline is the only .so
+        // we compile ourselves, so it needs the flag explicitly.
+        "-Wl,-z,max-page-size=16384",
         "-o", outFile.absolutePath,
         srcFile.absolutePath,
         "-ldl",
+        "-llog",
     )
 }
 

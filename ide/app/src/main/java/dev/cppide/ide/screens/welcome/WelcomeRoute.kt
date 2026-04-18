@@ -11,6 +11,9 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import dev.cppide.core.Core
 import dev.cppide.core.session.RecentProject
+import dev.cppide.ide.components.BodyText
+import dev.cppide.ide.components.CppDialog
+import dev.cppide.ide.util.friendlyNetworkError
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -26,6 +29,7 @@ fun WelcomeRoute(
     onOpenQuestions: () -> Unit,
     onAbout: () -> Unit,
     onLogout: () -> Unit,
+    onLogin: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     val recents by core.sessionRepository
@@ -38,19 +42,25 @@ fun WelcomeRoute(
     var totalUnread by remember { mutableIntStateOf(0) }
     var isUploading by remember { mutableStateOf(false) }
     var uploadResult by remember { mutableStateOf<String?>(null) }
+    var showLoginRequired by remember { mutableStateOf(false) }
 
     LaunchedEffect(session?.student?.id) {
         if (session != null) {
             core.chatApi.unreadSummary().onSuccess { entries ->
                 totalUnread = entries.sumOf { it.unreadCount }
             }
+        } else {
+            totalUnread = 0
         }
     }
+
+    val isLoggedIn = session != null
 
     WelcomeScreen(
         recents = recents,
         recentFiles = recentFiles,
         studentName = session?.student?.displayName,
+        isLoggedIn = isLoggedIn,
         totalUnread = totalUnread,
         isUploading = isUploading,
         uploadResult = uploadResult,
@@ -76,8 +86,11 @@ fun WelcomeRoute(
         },
         onCreateNew = onCreateNew,
         onOpenExercises = onOpenExercises,
-        onOpenQuestions = onOpenQuestions,
         onUploadSolutions = {
+            if (!isLoggedIn) {
+                showLoginRequired = true
+                return@WelcomeScreen
+            }
             isUploading = true
             uploadResult = null
             scope.launch {
@@ -87,17 +100,36 @@ fun WelcomeRoute(
                 } else {
                     core.solutionsApi.upload(solutions)
                         .onSuccess { count -> uploadResult = "Uploaded $count exercise${if (count != 1) "s" else ""}" }
-                        .onFailure { t -> uploadResult = "Upload failed: ${t.message}" }
+                        .onFailure { t -> uploadResult = friendlyNetworkError(t, "Upload failed") }
                 }
                 isUploading = false
             }
         },
+        onOpenQuestions = onOpenQuestions,
         onAbout = onAbout,
         onLogout = {
             core.studentAuth.logout()
             onLogout()
         },
+        onLogin = onLogin,
     )
+
+    if (showLoginRequired) {
+        CppDialog(
+            title = "Login required",
+            onDismiss = { showLoginRequired = false },
+            confirmText = "Log in",
+            onConfirm = {
+                showLoginRequired = false
+                onLogin()
+            },
+            dismissText = "Not now",
+        ) {
+            BodyText(
+                text = "Log in to upload your progress so it can be saved and reviewed.",
+            )
+        }
+    }
 }
 
 /**

@@ -73,7 +73,6 @@ fun EditorScreen(
     onIntent: (EditorIntent) -> Unit,
     onBack: () -> Unit,
     onRequestCompletion: suspend (liveContent: String, line: Int, column: Int) -> List<LspCompletion>,
-    onRequestHover: suspend (line: Int, column: Int) -> String?,
     onChatOpened: () -> Unit,
     onChatRefresh: () -> Unit,
     onCheckUnread: () -> Unit,
@@ -84,10 +83,14 @@ fun EditorScreen(
 
     var controller by remember { mutableStateOf<EditorController?>(null) }
 
-    // Load chat messages only when the chat tab transitions to active.
+    // Reload chat messages whenever the chat tab is the active bottom
+    // panel AND the active source file changes. Keying only on
+    // `chatActive` would leave stale messages after a tab-bar or
+    // file-tree switch.
     val chatActive = state.bottomPanelVisible && state.bottomPanelTab == BottomPanelTab.Chat
-    LaunchedEffect(chatActive) {
-        if (chatActive) onChatOpened()
+    val chatActiveForFile = state.openFile?.relativePath?.takeIf { chatActive }
+    LaunchedEffect(chatActiveForFile) {
+        chatActiveForFile?.let { onChatOpened() }
     }
 
     // Poll for new messages every 5s while the chat tab is visible.
@@ -177,7 +180,6 @@ fun EditorScreen(
                         initialContent = openFile.savedContent,
                         onContentChange = { onIntent(EditorIntent.EditContent(it)) },
                         onRequestCompletion = onRequestCompletion,
-                        onRequestHover = onRequestHover,
                         onToggleBreakpoint = { line ->
                             onIntent(EditorIntent.ToggleBreakpoint(line))
                         },
@@ -190,6 +192,7 @@ fun EditorScreen(
                                 stopped.sourceFile?.substringAfterLast('/')
                                     ?.substringAfterLast('\\') == openBasename
                             }?.sourceLine,
+                        lspDiagnostics = state.lspDiagnostics,
                         modifier = Modifier.fillMaxSize(),
                     )
                 }
@@ -206,11 +209,25 @@ fun EditorScreen(
                     onIntent = onIntent,
                     modifier = Modifier.fillMaxSize(),
                 )
+
+                // FAB lives inside the editor Box (not at screen root)
+                // so it rides above the bottom panel when the panel is
+                // open, instead of being hidden behind it.
+                if (!isMarkdown && !state.debuggerState.isActive) {
+                    RunFab(
+                        runState = state.runState,
+                        onRun = { onIntent(EditorIntent.RunOrStop) },
+                        onDebug = { onIntent(EditorIntent.StartDebug) },
+                        onStop = { onIntent(EditorIntent.RunOrStop) },
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(end = dimens.spacingL, bottom = dimens.spacingL),
+                    )
+                }
             }
 
             val ext = state.openFile?.name?.substringAfterLast('.', "")?.lowercase()
             val isCodeFile = ext in setOf("cpp", "c", "cc", "cxx", "h", "hpp")
-            val isCppFile = isCodeFile
 
             if (state.bottomPanelVisible) {
                 BottomPanel(
@@ -222,10 +239,13 @@ fun EditorScreen(
                     debugVariables = state.debugVariables,
                     expandedVariableRefs = state.expandedVariableRefs,
                     chatState = state.chatState,
-                    isCppFile = isCppFile,
+                    isCppFile = isCodeFile,
+                    isRunning = state.runState == RunState.Running ||
+                        state.debuggerState.isActive,
                     onSelectTab = { onIntent(EditorIntent.SwitchBottomTab(it)) },
                     onClose = { onIntent(EditorIntent.ToggleBottomPanel) },
                     onClearTerminal = { onIntent(EditorIntent.ClearTerminal) },
+                    onSendTerminalInput = { onIntent(EditorIntent.SendTerminalInput(it)) },
                     onJumpToProblem = { onIntent(EditorIntent.JumpToDiagnostic(it)) },
                     onToggleVariableExpansion = { ref ->
                         onIntent(EditorIntent.ToggleVariableExpansion(ref))
@@ -234,35 +254,14 @@ fun EditorScreen(
                     onChatSend = { onIntent(EditorIntent.SendChatMessage) },
                 )
             } else {
-                // Collapsed panel bar — always visible, lets user open
-                // the panel without needing to hit Run first.
                 CollapsedPanelBar(
                     chatUnreadCount = state.chatState.unreadCount,
-                    isCodeFile = isCppFile,
+                    isCodeFile = isCodeFile,
                     onSelectTab = { tab ->
                         onIntent(EditorIntent.SwitchBottomTab(tab))
                     },
                 )
             }
-        }
-
-        // Run/debug FAB (bottom-right). Hide for non-runnable files,
-        // and hide while the debugger is active (the floating debug
-        // toolbar over the editor handles all controls in that mode).
-        val openPath = state.openFile?.relativePath.orEmpty()
-        val isRunnableFile = !openPath.endsWith(".md", ignoreCase = true)
-        val debuggerActive = state.debuggerState.isActive
-        if (isRunnableFile && !state.bottomPanelVisible && !debuggerActive) {
-            RunFab(
-                runState = state.runState,
-                onRun = { onIntent(EditorIntent.RunOrStop) },
-                onDebug = { onIntent(EditorIntent.StartDebug) },
-                onStop = { onIntent(EditorIntent.RunOrStop) },
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(end = dimens.spacingL, bottom = dimens.spacingL + 32.dp)
-                    .navigationBarsPadding(),
-            )
         }
 
         // Modal drawer overlay.

@@ -99,62 +99,72 @@ class DebugCodeEditor @JvmOverloads constructor(
         val row = rowHeight
         if (row <= 0) return
         val viewH = height
-        val scroll = offsetY
-        val layout = layout
+        val viewW = width
         val dp = dpUnit
-        // Sora's line-number gutter sits in the left column. We don't have
-        // a precise public getter for its width, so we estimate from
-        // dpUnit — close enough for decoration drawing.
-        val gutterWidth = (row * 2.5f).coerceAtLeast(dp * 40f)
-        val textRight = width.toFloat()
 
-        // Resolve a 1-indexed source line to a screen-Y for the top of
-        // its row. Uses sora's actual layout API (which accounts for
-        // text size changes from pinch-zoom, line spacing, soft-wrap,
-        // etc.) so the decoration tracks the real text position even
-        // during fast scrolls. Falls back to plain row-math if the
-        // layout isn't ready yet (rare — only on the very first frame).
-        fun screenTopOfLine(line: Int): Float {
-            val layout0 = layout
-            if (layout0 == null) return ((line - 1) * row - scroll).toFloat()
-            val xy = layout0.getCharLayoutOffset(line - 1, 0)
-            // getCharLayoutOffset returns [bottom-y, x] in editor layout
-            // coordinates (post-zoom, pre-scroll). The y returned is the
-            // BASELINE bottom of the row, so subtract row to get the top.
-            // We then subtract the current scroll offset to get screen-y.
-            val rowBottomLayoutY = xy[0]
-            return rowBottomLayoutY - row - scroll
-        }
+        // Sora scrolls by calling `scrollTo(offsetX, offsetY)` on the
+        // View itself — so by the time our `onDraw` runs, the canvas
+        // is already pre-translated by `(-scrollX, -scrollY)` by the
+        // Android framework. Sora's internal renderer undoes that with
+        // its own `translate(+offsetX, +offsetY)` before drawing rows,
+        // but `super.onDraw` restores the canvas before returning to
+        // us. If we draw at `(rowTop - offsetY)` we're subtracting the
+        // scroll *on top of* the framework's translation, so the amber
+        // walks upward at twice the scroll rate — eventually off the
+        // top of the editor into the status bar.
+        //
+        // The simplest fix is to cancel the framework translation once
+        // up-front and then draw in plain view-screen coordinates, so
+        // the math matches what the user sees on the display.
+        val saveCount = canvas.save()
+        canvas.translate(scrollX.toFloat(), scrollY.toFloat())
 
-        // --- current-execution line (full-width amber fill behind text) ---
-        currentExecutionLine?.let { line ->
-            if (line < 1) return@let
-            val top = screenTopOfLine(line)
-            if (top + row >= 0 && top <= viewH) {
-                canvas.drawRect(
-                    0f, top,
-                    textRight, top + row,
-                    currentLineFill,
-                )
-                drawGutterArrow(canvas, top, row.toFloat(), gutterWidth)
-            }
-        }
+        try {
+            // Screen Y of the top of a 1-indexed source line. `getRowTop`
+            // is the row's position in layout-space; subtracting `offsetY`
+            // maps it to on-screen Y now that the canvas is in view coords.
+            fun screenTopOfLine(line: Int): Float =
+                (getRowTop(line - 1) - offsetY).toFloat()
 
-        // --- breakpoint markers ---
-        // Always painted as a filled red circle in the gutter, regardless
-        // of verification state. Verification is a backend concept the
-        // user shouldn't have to care about visually; if a breakpoint
-        // truly doesn't bind, the debugger says so in the panel.
-        if (breakpointLines.isNotEmpty()) {
-            val radius = (row * 0.30f).coerceAtMost(dp * 6f)
-            val cx = radius * 1.6f
-            for ((line, _) in breakpointLines) {
-                if (line < 1) continue
+            // Gutter width in screen coords. `measureTextRegionOffset()`
+            // is the X where text begins in *layout* space — it grows
+            // with `offsetX` as the user scrolls horizontally, because
+            // Sora's internal gutter computation is
+            // `-offsetX + measureTextRegionOffset` (see EditorRenderer).
+            // To pin the arrow on-screen just after the line numbers
+            // regardless of horizontal scroll, subtract `offsetX`.
+            val gutterWidth = measureTextRegionOffset() - offsetX
+            val textRight = viewW.toFloat()
+
+            // --- current-execution line (full-width amber fill) ---
+            currentExecutionLine?.let { line ->
+                if (line < 1) return@let
                 val top = screenTopOfLine(line)
-                if (top + row < 0 || top > viewH) continue
-                val cy = top + row / 2f
-                canvas.drawCircle(cx, cy, radius, bpFilled)
+                if (top + row >= 0 && top <= viewH) {
+                    canvas.drawRect(0f, top, textRight, top + row, currentLineFill)
+                    drawGutterArrow(canvas, top, row.toFloat(), gutterWidth)
+                }
             }
+
+            // --- breakpoint markers ---
+            // Always painted as a filled red circle in the gutter,
+            // regardless of verification state. Verification is a
+            // backend concept the user shouldn't have to care about
+            // visually; if a breakpoint truly doesn't bind the
+            // debugger panel says so.
+            if (breakpointLines.isNotEmpty()) {
+                val radius = (row * 0.30f).coerceAtMost(dp * 6f)
+                val cx = radius * 1.6f
+                for ((line, _) in breakpointLines) {
+                    if (line < 1) continue
+                    val top = screenTopOfLine(line)
+                    if (top + row < 0 || top > viewH) continue
+                    val cy = top + row / 2f
+                    canvas.drawCircle(cx, cy, radius, bpFilled)
+                }
+            }
+        } finally {
+            canvas.restoreToCount(saveCount)
         }
     }
 

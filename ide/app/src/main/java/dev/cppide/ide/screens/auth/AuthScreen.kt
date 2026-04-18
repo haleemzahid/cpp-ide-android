@@ -52,6 +52,10 @@ fun AuthScreen(
     errorMessage: String?,
     onSubmit: (name: String?, email: String, password: String, rememberMe: Boolean) -> Unit,
     onToggleMode: () -> Unit,
+    /** Dismiss the auth screen and carry on without logging in. Persists so
+     *  the welcome screen can hide the nag. Only relevant for callers who
+     *  show auth as a prompt — explicit login taps can ignore it. */
+    onSkip: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val colors = CppIde.colors
@@ -83,6 +87,22 @@ fun AuthScreen(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
+        if (onSkip != null) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+            ) {
+                BodyText(
+                    text = "Skip",
+                    color = colors.accent,
+                    modifier = Modifier
+                        .clickable(enabled = !isLoading, onClick = onSkip)
+                        .padding(dimens.spacingS),
+                )
+            }
+            Spacer(Modifier.height(dimens.spacingM))
+        }
+
         // Logo
         Box(
             modifier = Modifier

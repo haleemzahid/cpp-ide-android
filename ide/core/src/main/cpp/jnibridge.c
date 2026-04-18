@@ -4,7 +4,7 @@
 // loaded once at class init via System.loadLibrary("jnibridge"). It exposes
 // three native methods matching dev.cppide.core.jni.NativeBridge:
 //
-//   runUserProgram(libPath, outFd, errFd): Int
+//   runUserProgram(libPath, inFd, outFd, errFd): Int
 //     dlopen(libPath) -> dlsym("run_user_main") -> call with pipe fds
 //
 //   hasSymbol(libPath, symbol): Boolean
@@ -38,12 +38,12 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-typedef int (*run_user_main_fn)(int argc, char** argv, int out_fd, int err_fd);
+typedef int (*run_user_main_fn)(int argc, char** argv, int in_fd, int out_fd, int err_fd);
 
 JNIEXPORT jint JNICALL
 Java_dev_cppide_core_jni_NativeBridge_runUserProgram(
         JNIEnv* env, jclass clazz,
-        jstring jLibPath, jint outFd, jint errFd) {
+        jstring jLibPath, jint inFd, jint outFd, jint errFd) {
 
     const char* libPath = (*env)->GetStringUTFChars(env, jLibPath, NULL);
     LOGI("dlopen(%s)", libPath);
@@ -69,10 +69,10 @@ Java_dev_cppide_core_jni_NativeBridge_runUserProgram(
         return -1002;
     }
 
-    LOGI("calling run_user_main(outFd=%d, errFd=%d)", outFd, errFd);
+    LOGI("calling run_user_main(inFd=%d, outFd=%d, errFd=%d)", inFd, outFd, errFd);
 
     char* fake_argv[] = { (char*)"user_program", NULL };
-    int rc = fn(1, fake_argv, outFd, errFd);
+    int rc = fn(1, fake_argv, inFd, outFd, errFd);
 
     LOGI("user main returned %d", rc);
 

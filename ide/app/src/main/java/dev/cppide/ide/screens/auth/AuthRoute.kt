@@ -13,6 +13,7 @@ import kotlinx.coroutines.launch
 fun AuthRoute(
     core: Core,
     onAuthenticated: () -> Unit,
+    onSkip: (() -> Unit)? = null,
 ) {
     val scope = rememberCoroutineScope()
     var isLogin by remember { mutableStateOf(true) }
@@ -44,5 +45,6 @@ fun AuthRoute(
             isLogin = !isLogin
             errorMessage = null
         },
+        onSkip = onSkip,
     )
 }

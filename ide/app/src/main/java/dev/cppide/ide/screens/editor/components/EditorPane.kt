@@ -2,49 +2,34 @@ package dev.cppide.ide.screens.editor.components
 
 import android.graphics.Typeface
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Icon
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.viewinterop.AndroidView
 import dev.cppide.core.lsp.LspCompletion
+import dev.cppide.core.lsp.LspDiagnostic
+import dev.cppide.ide.editor.TextMateBootstrap
 import dev.cppide.ide.theme.CppIde
 import io.github.rosemoe.sora.event.ClickEvent
 import io.github.rosemoe.sora.event.ContentChangeEvent
 import io.github.rosemoe.sora.event.EditorMotionEvent
-import io.github.rosemoe.sora.event.LongPressEvent
+import io.github.rosemoe.sora.lang.diagnostic.DiagnosticRegion
+import io.github.rosemoe.sora.lang.diagnostic.DiagnosticsContainer
 import io.github.rosemoe.sora.langs.textmate.TextMateColorScheme
 import io.github.rosemoe.sora.langs.textmate.TextMateLanguage
 import io.github.rosemoe.sora.langs.textmate.registry.GrammarRegistry
 import io.github.rosemoe.sora.langs.textmate.registry.ThemeRegistry
-import kotlinx.coroutines.launch
+import io.github.rosemoe.sora.widget.schemes.EditorColorScheme
 
 /**
  * Imperative actions the surrounding screen can fire at the sora editor.
@@ -69,11 +54,6 @@ interface EditorController {
  * update → recomposition → setText → another ContentChangeEvent. With
  * sora-editor's TextMate highlighter, that loop allocates ~30 MB per
  * keystroke and OOMs after a few characters.
- *
- * Long-press a symbol to trigger a clangd hover: the result is shown as
- * a floating card anchored at the top of the editor. A top-anchored card
- * is easier to read on a phone than a popup at the touch point (which
- * your finger would otherwise cover).
  */
 @Composable
 fun EditorPane(
@@ -81,7 +61,6 @@ fun EditorPane(
     initialContent: String,
     onContentChange: (String) -> Unit,
     onRequestCompletion: suspend (liveContent: String, line: Int, column: Int) -> List<LspCompletion>,
-    onRequestHover: suspend (line: Int, column: Int) -> String?,
     onToggleBreakpoint: (line: Int) -> Unit,
     onControllerReady: (EditorController) -> Unit,
     /** 1-indexed source lines with breakpoints (+ verified flag). The
@@ -91,21 +70,20 @@ fun EditorPane(
      *  stopped inside this file. The editor highlights the line and
      *  scrolls to it. */
     currentLine: Int? = null,
+    /** clangd diagnostics for the currently open file. Rendered as squiggle
+     *  underlines under the offending text, with Sora's built-in diagnostic
+     *  tooltip window picking them up on cursor hover. */
+    lspDiagnostics: List<LspDiagnostic> = emptyList(),
     modifier: Modifier = Modifier,
     languageScope: String = "source.cpp",
 ) {
     val colors = CppIde.colors
-    val dimens = CppIde.dimens
+    val darkTheme = isSystemInDarkTheme()
     // Capture the latest callbacks so the AndroidView listeners (attached
     // once per editor instance) always call the freshest lambdas.
     val callback = rememberUpdatedState(onContentChange)
     val completionCallback = rememberUpdatedState(onRequestCompletion)
-    val hoverCallback = rememberUpdatedState(onRequestHover)
     val breakpointCallback = rememberUpdatedState(onToggleBreakpoint)
-    val scope = rememberCoroutineScope()
-
-    // Currently-shown hover text; null when no tooltip is visible.
-    var hoverText by remember(fileId) { mutableStateOf<String?>(null) }
 
     // Live reference to the editor. DebugCodeEditor paints the current
     // execution line and breakpoint gutter markers inside its own
@@ -118,7 +96,7 @@ fun EditorPane(
             .fillMaxSize()
             .background(colors.editorBackground),
     ) {
-        key(fileId) {
+        key(fileId, darkTheme) {
             AndroidView<DebugCodeEditor>(
                 modifier = Modifier.fillMaxSize(),
                 factory = { context ->
@@ -127,7 +105,19 @@ fun EditorPane(
                         // so we keep syntax highlighting, bracket/indent logic,
                         // etc., while replacing the identifier-based
                         // autocompleter with real clangd completions.
-                        colorScheme = TextMateColorScheme.create(ThemeRegistry.getInstance())
+                        ThemeRegistry.getInstance().setTheme(
+                            if (darkTheme) TextMateBootstrap.DARK_THEME_NAME
+                            else TextMateBootstrap.LIGHT_THEME_NAME,
+                        )
+                        colorScheme = TextMateColorScheme.create(ThemeRegistry.getInstance()).apply {
+                            // Sora's TextMate bridge leaves cursor + matched-bracket
+                            // colors defaulted, so in Dark+ the cursor lands
+                            // black-on-dark (invisible over `}` etc.). Pin both
+                            // to the Compose token so they track the theme.
+                            val cursorArgb = colors.editorCursor.toArgb()
+                            setColor(EditorColorScheme.SELECTION_INSERT, cursorArgb)
+                            setColor(EditorColorScheme.SELECTION_HANDLE, cursorArgb)
+                        }
                         val textMate = TextMateLanguage.create(
                             languageScope, GrammarRegistry.getInstance(), true
                         )
@@ -166,18 +156,6 @@ fun EditorPane(
                             callback.value(text.toString())
                         }
 
-                        // Long-press → clangd hover. The event fires on the
-                        // editor thread; we hop onto the Compose scope so the
-                        // suspend call + state update run where they should.
-                        subscribeAlways(LongPressEvent::class.java) { evt ->
-                            val line = evt.line
-                            val column = evt.column
-                            scope.launch {
-                                val result = hoverCallback.value(line, column)
-                                hoverText = result?.takeIf { it.isNotBlank() }
-                            }
-                        }
-
                         // Tap on the line-number gutter → toggle breakpoint.
                         // sora reports the click's region via the motion
                         // event; REGION_LINE_NUMBER means "gutter".
@@ -211,82 +189,50 @@ fun EditorPane(
                     if (currentLine != null && currentLine != prev) {
                         editor.scrollToLineCentered(currentLine)
                     }
+                    applyDiagnostics(editor, lspDiagnostics)
                 },
                 onRelease = { editor -> editor.release() },
-            )
-        }
-
-        // ---- hover tooltip overlay ----
-        hoverText?.let { text ->
-            HoverCard(
-                text = text,
-                onDismiss = { hoverText = null },
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .padding(dimens.spacingS),
             )
         }
     }
 }
 
 /**
- * Floating tooltip for clangd hover results. Top-anchored, dark surface,
- * monospace text, scrollable for long signatures, with an explicit close
- * button — on mobile an X is more discoverable than "tap outside".
+ * Converts clangd's [LspDiagnostic] list into a Sora [DiagnosticsContainer]
+ * and attaches it to the editor so squiggles render inline and
+ * [io.github.rosemoe.sora.widget.component.EditorDiagnosticsTooltipWindow]
+ * can show the message when the cursor enters a region.
  *
- * Clangd returns markdown in many cases; we render as plain text for v1
- * since the signature and type info is already readable without bold/
- * italic formatting.
+ * Out-of-range line/column values (stale diagnostics for a newer buffer)
+ * are skipped silently — clangd re-emits on every didChange, so the next
+ * pass overwrites this one anyway.
  */
-@Composable
-private fun HoverCard(
-    text: String,
-    onDismiss: () -> Unit,
-    modifier: Modifier = Modifier,
+private fun applyDiagnostics(
+    editor: DebugCodeEditor,
+    diagnostics: List<LspDiagnostic>,
 ) {
-    val colors = CppIde.colors
-    val dimens = CppIde.dimens
-    Surface(
-        modifier = modifier.widthIn(max = 360.dp),
-        color = colors.surfaceElevated,
-        contentColor = colors.textPrimary,
-        shape = RoundedCornerShape(dimens.radiusM),
-        shadowElevation = 8.dp,
-    ) {
-        Column(
-            modifier = Modifier
-                .padding(
-                    start = dimens.spacingM,
-                    end = dimens.spacingS,
-                    top = dimens.spacingS,
-                    bottom = dimens.spacingM,
-                ),
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End,
-            ) {
-                Icon(
-                    imageVector = Icons.Filled.Close,
-                    contentDescription = "Close hover",
-                    tint = colors.textSecondary,
-                    modifier = Modifier
-                        .clickable(onClick = onDismiss)
-                        .padding(dimens.spacingXs),
-                )
+    val container = DiagnosticsContainer()
+    if (diagnostics.isNotEmpty()) {
+        val content = editor.text
+        val totalLines = content.lineCount
+        for (d in diagnostics) {
+            if (d.line < 0 || d.line >= totalLines) continue
+            val endLineClamped = d.endLine.coerceIn(d.line, totalLines - 1)
+            val startCol = d.column.coerceAtLeast(0)
+                .coerceAtMost(content.getColumnCount(d.line))
+            val endColClamped = d.endColumn.coerceAtLeast(0)
+                .coerceAtMost(content.getColumnCount(endLineClamped))
+            val start = runCatching { content.getCharIndex(d.line, startCol) }.getOrNull() ?: continue
+            var end = runCatching { content.getCharIndex(endLineClamped, endColClamped) }.getOrNull() ?: continue
+            if (end <= start) end = start + 1
+            val severity = when (d.severity) {
+                LspDiagnostic.Severity.ERROR -> DiagnosticRegion.SEVERITY_ERROR
+                LspDiagnostic.Severity.WARNING -> DiagnosticRegion.SEVERITY_WARNING
+                LspDiagnostic.Severity.INFORMATION -> DiagnosticRegion.SEVERITY_TYPO
+                LspDiagnostic.Severity.HINT -> DiagnosticRegion.SEVERITY_TYPO
             }
-            Box(
-                modifier = Modifier
-                    .heightIn(max = 220.dp)
-                    .verticalScroll(rememberScrollState()),
-            ) {
-                Text(
-                    text = text,
-                    color = colors.textPrimary,
-                    fontSize = 12.sp,
-                    fontFamily = FontFamily.Monospace,
-                )
-            }
+            container.addDiagnostic(DiagnosticRegion(start, end, severity))
         }
     }
+    editor.diagnostics = container
 }

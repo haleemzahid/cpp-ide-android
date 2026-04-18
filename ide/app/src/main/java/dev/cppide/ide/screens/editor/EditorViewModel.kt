@@ -61,6 +61,18 @@ class EditorViewModel(
      *  coexist with a non-debug run cleanup. */
     private var debugJob: Job? = null
 
+    /**
+     * Stdin channel for the currently running inferior. UI typing lands
+     * here; [DefaultRunService] collects from it and pipes bytes to the
+     * child's stdin. `extraBufferCapacity` is modest because the user
+     * can't type fast enough to overflow a 64-entry buffer; `replay=0`
+     * because early chunks shouldn't be delivered to the NEXT run.
+     */
+    private val terminalStdin = MutableSharedFlow<String>(
+        replay = 0,
+        extraBufferCapacity = 64,
+    )
+
     /** Debounced auto-save job. Reset on every keystroke. */
     private var autoSaveJob: Job? = null
 
@@ -127,35 +139,12 @@ class EditorViewModel(
                 when (dbg) {
                     is DebuggerState.Stopped -> {
                         val file = dbg.sourceFile
-                        val line = dbg.sourceLine
-                        val loc = if (file != null && line != null) {
-                            " @ ${file.substringAfterLast('/')}:$line"
-                        } else ""
-                        val desc = dbg.description?.let { " ($it)" } ?: ""
-                        appendInfo("⏸ stopped: ${dbg.reason}$loc$desc")
-
-                        // Auto-open: if the stopped frame is in a file
-                        // that isn't the currently-active tab, open it
-                        // (or switch to its existing tab) so the editor
-                        // can paint the current-line highlight. Without
-                        // this, stepping into a function defined in
-                        // another file silently shows no marker and the
-                        // user has no idea where execution is.
-                        if (file != null && line != null) {
+                        if (file != null && dbg.sourceLine != null) {
                             autoOpenStoppedFile(file)
                         }
-
-                        // Refresh variables for the top frame. Each new
-                        // stop invalidates the previous scope/variable
-                        // snapshot, so we fetch fresh — running a tap
-                        // through the existing handle would race the
-                        // debugger anyway.
                         refreshVariablesForTopFrame(dbg)
                     }
                     is DebuggerState.Running -> {
-                        // Clear stale variables so the panel doesn't
-                        // show frame data from a different program
-                        // point while the inferior runs.
                         _state.update {
                             it.copy(
                                 debugScopes = emptyList(),
@@ -168,8 +157,7 @@ class EditorViewModel(
                         appendInfo("■ debug session exited (code=${dbg.code}${if (dbg.signaled) ", signaled" else ""})")
                     is DebuggerState.Failed ->
                         appendError("debug failed: ${dbg.message}")
-                    is DebuggerState.Starting ->
-                        appendInfo("  debugger: ${dbg.stage}")
+                    is DebuggerState.Starting,
                     DebuggerState.Idle -> Unit
                 }
             }
@@ -239,6 +227,7 @@ class EditorViewModel(
             }
             is EditorIntent.JumpToDiagnostic -> jumpTo(intent.diagnostic)
             EditorIntent.ClearTerminal -> _state.update { it.copy(terminalLines = emptyList()) }
+            is EditorIntent.SendTerminalInput -> sendTerminalInput(intent.text)
 
             // ---- debug ----
             EditorIntent.StartDebug -> startDebug()
@@ -306,7 +295,9 @@ class EditorViewModel(
             }
 
             // ---- chat ----
-            is EditorIntent.UpdateChatInput -> _state.update { it.copy(chatState = it.chatState.copy(input = intent.text)) }
+            is EditorIntent.UpdateChatInput -> _state.update {
+                it.copy(chatState = it.chatState.copy(input = intent.text, sendError = null))
+            }
             EditorIntent.SendChatMessage -> sendChatMessage()
 
             // ---- misc ----
@@ -383,7 +374,23 @@ class EditorViewModel(
         val filePath = buildChatFilePath() ?: return
         val (categorySlug, exerciseSlug) = parseSlugs() ?: return
 
-        _state.update { it.copy(chatState = it.chatState.copy(isSending = true)) }
+        // Chat requires an account. Surface the login requirement in
+        // the chat panel itself instead of firing a broken HTTP request.
+        if (!core.studentAuth.isLoggedIn) {
+            _state.update {
+                it.copy(
+                    chatState = it.chatState.copy(
+                        isSending = false,
+                        sendError = "Please log in to send chat messages.",
+                    ),
+                )
+            }
+            return
+        }
+
+        _state.update {
+            it.copy(chatState = it.chatState.copy(isSending = true, sendError = null))
+        }
         viewModelScope.launch {
             val mdPath = openFile.relativePath
                 .substringBeforeLast("/") + "/README.md"
@@ -402,13 +409,16 @@ class EditorViewModel(
                         messages = it.chatState.messages + msg,
                         input = "",
                         isSending = false,
+                        sendError = null,
                     ))
                 }
             }.onFailure { t ->
                 _state.update {
                     it.copy(
-                        chatState = it.chatState.copy(isSending = false),
-                        errorMessage = "Send failed: ${t.message}",
+                        chatState = it.chatState.copy(
+                            isSending = false,
+                            sendError = dev.cppide.ide.util.friendlyNetworkError(t, "Send failed"),
+                        ),
                     )
                 }
             }
@@ -781,6 +791,15 @@ class EditorViewModel(
      */
     private suspend fun restoreOrSeedTabs(tree: dev.cppide.core.project.ProjectNode.Directory?) {
         tree ?: return
+        // If the route already asked for a specific file via
+        // `initialOpenFile`, that OpenFile intent may have raced ahead
+        // of this coroutine and populated openTabs already. Clobbering
+        // those tabs here would make the editor land on the persisted
+        // last-active file instead of the one the user just clicked
+        // from the Recent Files list — a confusing bug where tapping
+        // 5.cpp would open 2.cpp. Bail out and let the route's choice
+        // win.
+        if (_state.value.openTabs.isNotEmpty()) return
         val saved = ProjectUiState.load(core.context, _state.value.project.root)
         val paths = saved.openPaths.filter { pathExistsInTree(tree, it) }
         val toOpen = if (paths.isNotEmpty()) paths else listOfNotNull(
@@ -800,9 +819,17 @@ class EditorViewModel(
         val activeIdx = loaded.indexOfFirst { it.relativePath == activePath }
             .takeIf { it >= 0 } ?: 0
 
+        var applied = false
         _state.update { s ->
-            s.copy(openTabs = loaded, activeTabIndex = activeIdx)
+            // Second check inside the update closure to cover the case
+            // where OpenFile landed between the earlier guard and here.
+            if (s.openTabs.isNotEmpty()) s
+            else {
+                applied = true
+                s.copy(openTabs = loaded, activeTabIndex = activeIdx)
+            }
         }
+        if (!applied) return
         persistUiState()
 
         // Tell clangd about each restored tab. didOpen is idempotent from
@@ -938,9 +965,10 @@ class EditorViewModel(
                 ) }
                 appendInfo("Installing toolchain (first run, ~30s)…")
             }
-            val install = core.toolchain.install { progress ->
-                if (needsExtract) appendInfo("  $progress")
-            }
+            // Progress updates land on ToolchainState via install() already,
+            // which the UI surfaces as a spinner status. Don't spam the
+            // terminal with per-500-file "extracted N files (M MB)" lines.
+            val install = core.toolchain.install { /* silent */ }
             if (install.isFailure) {
                 appendError("Toolchain install failed: ${install.exceptionOrNull()?.message}")
                 _state.update { it.copy(runState = RunState.Idle) }
@@ -998,7 +1026,9 @@ class EditorViewModel(
     private suspend fun runProgram(library: File) {
         _state.update { it.copy(runState = RunState.Running, bottomPanelTab = BottomPanelTab.Terminal) }
 
-        core.runService.run(RunConfig(library = library)).collect { event ->
+        core.runService.run(
+            RunConfig(library = library, stdin = terminalStdin),
+        ).collect { event ->
             when (event) {
                 RunEvent.Started -> appendInfo("Running…")
                 is RunEvent.Stdout -> appendStdout(event.text)
@@ -1020,6 +1050,25 @@ class EditorViewModel(
         runJob = null
         appendInfo("Stopped")
         _state.update { it.copy(runState = RunState.Idle) }
+    }
+
+    /**
+     * Forward a line of user input to the running inferior's stdin. Appends
+     * `\n` unconditionally — line-based programs (cin >> x, getline) need it,
+     * and the few byte-oriented programs that don't can still parse it out.
+     * No-op when nothing is running; we also echo the submitted text into the
+     * terminal panel so the user sees what they sent.
+     */
+    private fun sendTerminalInput(text: String) {
+        // Accept during Run (runState=Running) OR during an active debug
+        // session — debug is tracked on a separate state machine.
+        val debugActive = core.debuggerService.state.value.isActive
+        if (_state.value.runState != RunState.Running && !debugActive) return
+        val line = text + "\n"
+        appendStdout(line)
+        if (!terminalStdin.tryEmit(line)) {
+            appendError("stdin buffer full — input dropped")
+        }
     }
 
     // ---- debug pipeline ----
@@ -1053,9 +1102,8 @@ class EditorViewModel(
             if (abortIfStaticErrors("Debug")) return@launch
 
             // Open the terminal panel immediately so the FAB hides
-            // and the user sees "Preparing debugger…" as it happens
-            // instead of the FAB visually lingering through the
-            // toolchain install + build phase.
+            // through the toolchain install + build phase instead of
+            // lingering visibly while work happens off-screen.
             _state.update {
                 it.copy(
                     bottomPanelVisible = true,
@@ -1064,7 +1112,6 @@ class EditorViewModel(
             }
 
             // 1. Toolchain install (idempotent).
-            appendInfo("Preparing debugger…")
             val install = core.toolchain.install()
             if (install.isFailure) {
                 appendError("Toolchain install failed: ${install.exceptionOrNull()?.message}")
@@ -1081,8 +1128,6 @@ class EditorViewModel(
                 bottomPanelTab = BottomPanelTab.Terminal,
                 problems = emptyList(),
             ) }
-            appendInfo("Debug-building ${openFile.name}…")
-
             val source = core.projectService.resolve(openFile.relativePath)
             val buildDir = File(core.context.filesDir, "build-debug/${state.value.project.name}")
             buildDir.mkdirs()
@@ -1103,7 +1148,6 @@ class EditorViewModel(
             val buildResult = core.buildService.build(config)
             when (buildResult) {
                 is BuildResult.Success -> {
-                    appendInfo("Debug build OK in ${buildResult.durationMs} ms")
                     _state.update { it.copy(problems = buildResult.diagnostics) }
                 }
                 is BuildResult.Failure -> {
@@ -1131,11 +1175,11 @@ class EditorViewModel(
                 appendError("Trampoline binary missing at ${trampoline.absolutePath}")
                 return@launch
             }
-            appendInfo("Starting lldb-dap with ${trampoline.name}…")
             core.debuggerService.start(
                 trampolineBinary = trampoline,
                 userLibrary = outputSo,
                 projectRoot = state.value.project.root,
+                stdin = terminalStdin,
             ).onFailure { t -> appendError("debugger start failed: ${t.message}") }
         }
     }
@@ -1175,17 +1219,6 @@ class EditorViewModel(
         val items = core.lspService.complete(file, line, column)
         Log.d(TAG, "requestCompletion got ${items.size} items")
         return items
-    }
-
-    /**
-     * Fetch clangd hover info for the open file at [line]/[column] (both
-     * 0-indexed). Invoked by [EditorPane] on long-press. Returns null
-     * when clangd has nothing — caller suppresses the tooltip then.
-     */
-    suspend fun requestHover(line: Int, column: Int): String? {
-        val openFile = _state.value.openFile ?: return null
-        val file = core.projectService.resolve(openFile.relativePath)
-        return core.lspService.hover(file, line, column)
     }
 
     // ---- diagnostic helpers ----

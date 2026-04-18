@@ -86,6 +86,7 @@ private fun AppNavigation(core: Core) {
         core.context.getSharedPreferences("onboarding", android.content.Context.MODE_PRIVATE)
     }
     val hasSeenOnboarding = remember { prefs.getBoolean("seen", false) }
+    val hasSkippedAuth = remember { prefs.getBoolean("auth_skipped", false) }
 
     LaunchedEffect(Unit) {
         isLoggedIn = core.studentAuth.tryRestore()
@@ -94,10 +95,15 @@ private fun AppNavigation(core: Core) {
 
     if (!authChecked) return
 
+    // Login is optional. First launch after onboarding lands on Auth
+    // (with a Skip button) so the user sees the option. If they skip
+    // once or log in, we don't auto-prompt again; subsequent launches
+    // go straight to Welcome. Login stays accessible from Welcome's
+    // top-bar icon for anyone who skipped and later changes their mind.
     val startDest = when {
         !hasSeenOnboarding -> Routes.ONBOARDING
-        isLoggedIn -> Routes.WELCOME
-        else -> Routes.AUTH
+        !isLoggedIn && !hasSkippedAuth -> Routes.AUTH
+        else -> Routes.WELCOME
     }
 
     NavHost(navController = navController, startDestination = startDest) {
@@ -105,7 +111,7 @@ private fun AppNavigation(core: Core) {
             OnboardingScreen(
                 onFinish = {
                     prefs.edit().putBoolean("seen", true).apply()
-                    navController.navigate(Routes.AUTH) {
+                    navController.navigate(Routes.WELCOME) {
                         popUpTo(Routes.ONBOARDING) { inclusive = true }
                     }
                 },
@@ -116,8 +122,18 @@ private fun AppNavigation(core: Core) {
                 core = core,
                 onAuthenticated = {
                     isLoggedIn = true
-                    navController.navigate(Routes.WELCOME) {
-                        popUpTo(Routes.AUTH) { inclusive = true }
+                    if (!navController.popBackStack(Routes.WELCOME, inclusive = false)) {
+                        navController.navigate(Routes.WELCOME) {
+                            popUpTo(Routes.AUTH) { inclusive = true }
+                        }
+                    }
+                },
+                onSkip = {
+                    prefs.edit().putBoolean("auth_skipped", true).apply()
+                    if (!navController.popBackStack(Routes.WELCOME, inclusive = false)) {
+                        navController.navigate(Routes.WELCOME) {
+                            popUpTo(Routes.AUTH) { inclusive = true }
+                        }
                     }
                 },
             )
@@ -143,9 +159,9 @@ private fun AppNavigation(core: Core) {
                 onAbout = { navController.navigate(Routes.ABOUT) },
                 onLogout = {
                     isLoggedIn = false
-                    navController.navigate(Routes.AUTH) {
-                        popUpTo(0) { inclusive = true }
-                    }
+                },
+                onLogin = {
+                    navController.navigate(Routes.AUTH)
                 },
             )
         }
@@ -191,6 +207,7 @@ private fun AppNavigation(core: Core) {
             QuestionsRoute(
                 core = core,
                 onBack = { navController.popBackStack() },
+                onLogin = { navController.navigate(Routes.AUTH) },
                 onOpenConversation = { conv ->
                     // The conversation's filePath is like "category/exercise/solution.cpp".
                     // The project root is filesDir/projects/<category>.

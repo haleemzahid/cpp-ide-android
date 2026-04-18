@@ -10,6 +10,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ripple
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -36,6 +38,8 @@ import dev.cppide.ide.components.Codicon
 import dev.cppide.ide.components.Codicons
 import dev.cppide.ide.screens.editor.EditorIntent
 import dev.cppide.ide.theme.CppIde
+
+private val TOP_PADDING = 8.dp
 
 /**
  * Floating VSCode-style debug toolbar. Renders as an overlay on the
@@ -72,28 +76,30 @@ fun FloatingDebugPanel(
 
     if (!isActive) return
 
-    // Draggable position offset relative to the panel's "natural" anchor
-    // (which the host sets via [modifier], typically top-center). Persists
-    // for the lifetime of the active debug session — when the session
-    // ends the composable leaves the tree and the offset resets.
-    var dragOffset by remember { mutableStateOf(Offset.Zero) }
-    // Panel size in px, captured at first layout. Used to clamp the drag
-    // so the user can't fling the toolbar entirely off-screen.
-    var panelSize by remember { mutableStateOf(IntSize.Zero) }
-    // Container size — the editor box we live inside. Captured the same
-    // way (we use a parent-relative Box modifier in the tree).
-    var containerSize by remember { mutableStateOf(IntSize.Zero) }
+    val context = LocalContext.current
     val density = LocalDensity.current
+    val topPaddingPx = with(density) { TOP_PADDING.toPx() }
 
-    // Outer Box fills the entire editor area so its size is the
-    // real container bounds we clamp the drag against. Caller is
-    // expected to pass `Modifier.fillMaxSize()` so this works; we
-    // also call .fillMaxSize() defensively in case they don't.
-    //
-    // Pointer events on empty space inside this Box pass through
-    // to the editor underneath (Compose only intercepts touches
-    // where there's a registered pointerInput modifier — the inner
-    // panel has one, the outer Box does not).
+    var dragOffset by remember {
+        val p = FloatingDebugPanelPrefs.load(context)
+        mutableStateOf(Offset(p.dx, p.dy))
+    }
+    var panelSize by remember { mutableStateOf(IntSize.Zero) }
+    var containerSize by remember { mutableStateOf(IntSize.Zero) }
+
+    // Re-clamp on container / panel resize (rotation, bottom-panel
+    // open/close) so a position saved under one layout doesn't leave
+    // the toolbar stranded off-screen under another.
+    LaunchedEffect(containerSize, panelSize, topPaddingPx) {
+        if (containerSize.width > 0 && panelSize.width > 0) {
+            val clamped = clampDragOffset(dragOffset, containerSize, panelSize, topPaddingPx)
+            if (clamped != dragOffset) dragOffset = clamped
+        }
+    }
+
+    // Outer Box fills the editor area to capture container bounds for
+    // drag clamping. Empty-space touches fall through to the editor
+    // below because only the inner draggable panel has pointerInput.
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -101,14 +107,12 @@ fun FloatingDebugPanel(
     ) {
         Box(
             modifier = Modifier
-                // Initial position: top-center, with a bit of headroom.
-                // Drag offset is added on top.
                 .align(Alignment.TopCenter)
-                .padding(top = 8.dp)
+                .padding(top = TOP_PADDING)
                 .offset { IntOffset(dragOffset.x.roundToInt(), dragOffset.y.roundToInt()) }
                 .onSizeChanged { panelSize = it }
                 .background(
-                    color = Color(0xCC1F1F22),  // dark + slightly translucent
+                    color = Color(0xCC1F1F22),
                     shape = RoundedCornerShape(24.dp),
                 )
                 .padding(horizontal = 4.dp, vertical = 4.dp),
@@ -117,11 +121,10 @@ fun FloatingDebugPanel(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(2.dp),
             ) {
-                // Drag handle — a slim grip on the left, exactly like
-                // VSCode's debug toolbar. Captures pointer input so the
-                // user can grab it and reposition the panel anywhere
-                // inside the editor area. We constrain the offset so
-                // the panel can't be dragged entirely off-screen.
+                // Drag handle: only this region accepts drag gestures,
+                // so taps on the toolbar buttons themselves still
+                // route to their onClick handlers instead of being
+                // swallowed by the drag detector.
                 Box(
                     modifier = Modifier
                         .size(width = 20.dp, height = 36.dp)
@@ -129,18 +132,17 @@ fun FloatingDebugPanel(
                             detectDragGestures(
                                 onDrag = { change, dragAmount ->
                                     change.consume()
-                                    val newRaw = dragOffset + dragAmount
-                                    // Half-panel padding so at minimum a
-                                    // sliver stays visible at every edge,
-                                    // matching VSCode's "stays grabbable"
-                                    // behavior.
-                                    val maxX = (containerSize.width - panelSize.width / 2).toFloat()
-                                    val minX = (-panelSize.width / 2).toFloat()
-                                    val maxY = (containerSize.height - panelSize.height / 2).toFloat()
-                                    val minY = (-panelSize.height / 2).toFloat()
-                                    dragOffset = Offset(
-                                        x = newRaw.x.coerceIn(minX, maxX),
-                                        y = newRaw.y.coerceIn(minY, maxY),
+                                    dragOffset = clampDragOffset(
+                                        dragOffset + dragAmount,
+                                        containerSize,
+                                        panelSize,
+                                        topPaddingPx,
+                                    )
+                                },
+                                onDragEnd = {
+                                    FloatingDebugPanelPrefs.save(
+                                        context,
+                                        FloatingDebugPanelPrefs.Position(dragOffset.x, dragOffset.y),
                                     )
                                 },
                             )
@@ -153,9 +155,8 @@ fun FloatingDebugPanel(
                         color = Color(0xFF8E8E90),
                     )
                 }
-            // Continue / Pause toggle. VSCode shows Continue when stopped
-            // and Pause when running. Same physical button position, so
-            // muscle memory works.
+            // Continue ↔ Pause toggle occupies the same slot, matching
+            // VSCode so muscle memory works.
             if (isRunning) {
                 ToolbarButton(
                     icon = Codicons.DEBUG_PAUSE,
@@ -191,9 +192,37 @@ fun FloatingDebugPanel(
                 contentColor = Color(0xFFF14C4C),
                 onClick = { onIntent(EditorIntent.DebugStop) },
             )
-            }  // Row
-        }  // inner panel Box
-    }  // outer container Box
+            }
+        }
+    }
+}
+
+/**
+ * Keeps the toolbar fully inside [containerSize]. [dragOffset] is the
+ * delta from the panel's natural anchor (top-center, [topPaddingPx]
+ * from the top); we convert to absolute, clamp, convert back.
+ * Returns the input unchanged on the first layout pass when either
+ * size is zero — clamping then would collapse everything to (0,0).
+ */
+private fun clampDragOffset(
+    dragOffset: Offset,
+    containerSize: IntSize,
+    panelSize: IntSize,
+    topPaddingPx: Float,
+): Offset {
+    if (containerSize.width <= 0 || containerSize.height <= 0) return dragOffset
+    if (panelSize.width <= 0 || panelSize.height <= 0) return dragOffset
+
+    val anchorX = (containerSize.width - panelSize.width) / 2f
+    val anchorY = topPaddingPx
+
+    val maxX = (containerSize.width - panelSize.width).toFloat().coerceAtLeast(0f)
+    val maxY = (containerSize.height - panelSize.height).toFloat().coerceAtLeast(0f)
+
+    val clampedX = (anchorX + dragOffset.x).coerceIn(0f, maxX)
+    val clampedY = (anchorY + dragOffset.y).coerceIn(0f, maxY)
+
+    return Offset(clampedX - anchorX, clampedY - anchorY)
 }
 
 @Composable

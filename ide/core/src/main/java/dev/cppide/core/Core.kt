@@ -55,16 +55,24 @@ class Core private constructor(
     /**
      * Copies the bundled runtime shim source (runtime_shim.cpp) from assets
      * into app-private storage so [BuildService] can pass it to clang++
-     * when `BuildConfig.wrapMain = true`. Idempotent — the second call is
-     * a no-op if the file is already present and the assets haven't changed.
+     * when `BuildConfig.wrapMain = true`.
+     *
+     * Always compares the on-disk bytes against the APK asset and rewrites
+     * if they differ. The previous implementation only wrote when the file
+     * was missing — which meant an app upgrade that changed the shim (e.g.
+     * the 4→5 arg `run_user_main` signature when stdin support landed) was
+     * silently using the stale cached copy and producing user .so's with
+     * the wrong ABI.
      */
     fun runtimeShimSource(): File {
         val dst = File(context.filesDir, "runtime/runtime_shim.cpp")
-        if (!dst.exists() || dst.length() == 0L) {
+        val assetBytes = context.assets.open(RUNTIME_SHIM_ASSET).use { it.readBytes() }
+        val needsWrite = !dst.exists() ||
+            dst.length() != assetBytes.size.toLong() ||
+            !dst.readBytes().contentEquals(assetBytes)
+        if (needsWrite) {
             dst.parentFile?.mkdirs()
-            context.assets.open(RUNTIME_SHIM_ASSET).use { input ->
-                dst.outputStream().use { output -> input.copyTo(output) }
-            }
+            dst.writeBytes(assetBytes)
         }
         return dst
     }

@@ -1,43 +1,39 @@
-// Debugger trampoline — the actual process lldb-server attaches to
-// when the user hits Debug.
+// Debugger trampoline — the program lldb-dap launches for Debug runs.
 //
-// Our Run pipeline compiles user C/C++ into a PIC shared library
-// (libuser.so) that exports `run_user_main(argc, argv, out_fd, err_fd)`
-// as extern "C" — see runtime_shim.cpp. For release runs we dlopen
-// that .so inside the IDE's own process. But ptrace is process-based;
-// you can't single-step code that lives in the debugger's own address
-// space. So for Debug runs we spawn *this* trampoline as a fresh
-// forked child under `lldb-server gdbserver`, which PTRACE_TRACEME's
-// it and stops it at entry. The trampoline then dlopens libuser.so
-// and jumps to run_user_main — and lldb-server sees every instruction.
+// Compiles user C/C++ into a PIC shared library (libuser.so) that exports
+// `run_user_main(argc, argv, in_fd, out_fd, err_fd)`. We dlopen that .so
+// and call run_user_main. ptrace is process-based, so this binary is what
+// lldb actually attaches to.
 //
-// Keep this file microscopic. Anything we do here before hitting
-// user_main_fn becomes noise in the user's "first step" experience.
+// Keep this microscopic: any work done here before user main runs becomes
+// noise in the user's "first step" experience. Error paths set a distinct
+// exit code but do not write to stderr — that would leak into the IDE's
+// terminal panel where only the user's own stdout/stderr belongs.
 
 #include <dlfcn.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <libgen.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <android/log.h>
 
-// Matches runtime_shim.cpp's extern "C" export exactly.
-typedef int (*run_user_main_t)(int argc, char** argv, int out_fd, int err_fd);
+#define TAG "cppide-trampoline"
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  TAG, __VA_ARGS__)
+
+typedef int (*run_user_main_t)(int argc, char** argv,
+                               int in_fd, int out_fd, int err_fd);
 
 /**
- * Belt-and-suspenders: derive nativeLibraryDir from argv[0] (we're
- * running AS libTrampoline.so from that directory) and prepend it to
- * LD_LIBRARY_PATH ourselves. Without this, user code linking against
- * libc++_shared.so fails with "library not found" if whoever launched
- * us — lldb-server in our case — dropped or mangled the parent
- * environment. Doing it here means the trampoline Just Works regardless
- * of how we're invoked, even straight from adb shell.
+ * Derive nativeLibraryDir from argv[0] and prepend it to LD_LIBRARY_PATH
+ * so user code linking libc++_shared.so can resolve it regardless of how
+ * we were invoked.
  */
 static void fix_ld_library_path(const char* argv0) {
-    // argv0 is the full path to libTrampoline.so. Its dirname is
-    // nativeLibraryDir, which holds libc++_shared.so + all the other
-    // staged libs we ship.
     char buf[2048];
     strncpy(buf, argv0, sizeof(buf) - 1);
     buf[sizeof(buf) - 1] = 0;
@@ -51,35 +47,20 @@ static void fix_ld_library_path(const char* argv0) {
         snprintf(merged, sizeof(merged), "%s", dir);
     }
     setenv("LD_LIBRARY_PATH", merged, 1);
-    fprintf(stderr, "T> set LD_LIBRARY_PATH=%s\n", merged);
-    fflush(stderr);
 }
 
 int main(int argc, char** argv) {
-    // Stage-by-stage diagnostic prints so we can tell exactly where a
-    // broken launch dies — without a debugger ironically. Each message
-    // is prefixed so it's easy to grep in combined stdout/stderr.
-    // All prints go to stderr so stdout stays clean for user output.
-    fprintf(stderr, "T> entry argc=%d argv0=%s\n", argc,
-            argv[0] ? argv[0] : "(null)");
-    fflush(stderr);
-
     if (argc < 2) {
-        fprintf(stderr, "T> usage: %s <user.so>\n", argv[0]);
+        LOGE("usage: %s <user.so>", argv[0] ? argv[0] : "(null)");
         return 2;
     }
     const char* so_path = argv[1];
-    fprintf(stderr, "T> so_path=%s\n", so_path);
-    fflush(stderr);
 
-    // Make the loader self-sufficient (see comment on the helper).
     fix_ld_library_path(argv[0]);
 
-    // Explicit preload of libc++_shared.so with RTLD_GLOBAL. Bionic's
-    // linker is inconsistent about honouring LD_LIBRARY_PATH updates
-    // after startup, but a successful RTLD_GLOBAL dlopen puts the
-    // library in the global namespace so the user .so's later dlopen
-    // finds it by name without searching LD_LIBRARY_PATH at all.
+    // Preload libc++_shared.so with RTLD_GLOBAL so user .so's later
+    // dlopen finds it in the global namespace without searching
+    // LD_LIBRARY_PATH.
     {
         char buf[2048];
         strncpy(buf, argv[0], sizeof(buf) - 1);
@@ -87,59 +68,43 @@ int main(int argc, char** argv) {
         const char* dir = dirname(buf);
         char cpp_path[2048];
         snprintf(cpp_path, sizeof(cpp_path), "%s/libc++_shared.so", dir);
-        void* cxx = dlopen(cpp_path, RTLD_NOW | RTLD_GLOBAL);
-        if (cxx) {
-            fprintf(stderr, "T> preloaded libc++_shared.so\n");
-        } else {
-            fprintf(stderr, "T> preload libc++_shared.so failed: %s (continuing)\n",
-                    dlerror());
-        }
-        fflush(stderr);
+        dlopen(cpp_path, RTLD_NOW | RTLD_GLOBAL);
     }
 
-    // RTLD_NOW so undefined symbols fail loudly here rather than at a
-    // random step later. RTLD_LOCAL so we don't pollute the global
-    // namespace — purely hygiene; we're about to exit anyway.
-    fprintf(stderr, "T> calling dlopen\n");
-    fflush(stderr);
     void* handle = dlopen(so_path, RTLD_NOW | RTLD_LOCAL);
     if (!handle) {
-        fprintf(stderr, "T> dlopen failed: %s\n", dlerror());
+        LOGE("dlopen failed: %s", dlerror());
         return 3;
     }
-    fprintf(stderr, "T> dlopen ok, handle=%p\n", handle);
-    fflush(stderr);
 
-    fprintf(stderr, "T> calling dlsym run_user_main\n");
-    fflush(stderr);
     run_user_main_t fn = (run_user_main_t) dlsym(handle, "run_user_main");
     if (!fn) {
-        fprintf(stderr, "T> dlsym failed: %s\n", dlerror());
+        LOGE("dlsym(run_user_main) failed: %s", dlerror());
         return 4;
     }
-    fprintf(stderr, "T> dlsym ok, fn=%p\n", (void*)fn);
-    fflush(stderr);
 
-    // Signal the debugger (if any) that the user .so is loaded and
-    // resolved. Raise SIGTRAP, which under ptrace stops the tracee and
-    // lets the tracer refresh its loaded-library list and set pending
-    // breakpoints at real runtime addresses. Non-traced runs see the
-    // default SIGTRAP handler, which terminates the process — but the
-    // trampoline is only ever launched under ptrace, so this is fine
-    // in practice. The tracer swallows the signal on `vCont;c` (sends
-    // plain `c` without the `C<sig>` signal delivery form).
-    fprintf(stderr, "T> raising SIGTRAP for debugger sync\n");
-    fflush(stderr);
+    // Signal the debugger that the user .so is loaded so it can refresh
+    // its loaded-library list and bind pending breakpoints. Under ptrace
+    // this stops the tracee; the tracer swallows the signal on resume.
     raise(SIGTRAP);
 
-    // argc=0 / argv=NULL — user code that inspects argv gets a clean
-    // empty environment. Real stdout/stderr are already wired to the
-    // process pipes lldb-server gave us, so pass them straight through.
-    fprintf(stderr, "T> calling run_user_main\n");
-    fflush(stderr);
-    int rc = fn(0, NULL, STDOUT_FILENO, STDERR_FILENO);
-    fprintf(stderr, "T> run_user_main returned %d\n", rc);
-    fflush(stderr);
+    // If the launcher passed CPPIDE_STDIN_FIFO, open it for reading and
+    // hand the fd to run_user_main. lldb-dap 21's own stdin redirection
+    // paths (`process launch -i`, `target.input-path`) both trigger an
+    // "(empty)" regression in the launch validator, so we bypass lldb
+    // and redirect inside the debugged process instead.
+    int user_in_fd = STDIN_FILENO;
+    const char* fifo_path = getenv("CPPIDE_STDIN_FIFO");
+    if (fifo_path && *fifo_path) {
+        int fifo_fd = open(fifo_path, O_RDONLY);
+        if (fifo_fd >= 0) {
+            user_in_fd = fifo_fd;
+        } else {
+            LOGE("open(%s) failed: errno=%d (%s)", fifo_path, errno, strerror(errno));
+        }
+    }
+
+    int rc = fn(0, NULL, user_in_fd, STDOUT_FILENO, STDERR_FILENO);
 
     fflush(stdout);
     fflush(stderr);

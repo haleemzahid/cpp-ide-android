@@ -2,12 +2,18 @@ package dev.cppide.core.debug
 
 import android.util.Log
 import dev.cppide.core.common.DispatcherProvider
+import dev.cppide.core.common.pumpUtf8Into
 import dev.cppide.core.toolchain.Toolchain
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -24,6 +30,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.File
+import java.io.FileOutputStream
 import java.io.InputStreamReader
 import java.nio.charset.StandardCharsets
 
@@ -79,6 +86,8 @@ class LldbDapDebuggerService(
         val process: Process,
         val conn: DapConnection,
         val scope: CoroutineScope,
+        /** FIFO used as the inferior's stdin. Unlinked on session teardown. */
+        val stdinFifo: File? = null,
     )
 
     private var session: Session? = null
@@ -124,12 +133,13 @@ class LldbDapDebuggerService(
         trampolineBinary: File,
         userLibrary: File,
         projectRoot: File,
+        stdin: Flow<String>?,
     ): Result<Unit> = withContext(dispatchers.io) {
         sessionLock.withLock {
             if (session != null) {
                 return@withLock Result.failure(IllegalStateException("session already active"))
             }
-            runCatching { startLocked(trampolineBinary, userLibrary, projectRoot) }
+            runCatching { startLocked(trampolineBinary, userLibrary, projectRoot, stdin) }
                 .onFailure { t ->
                     Log.e(TAG, "start failed", t)
                     _state.value = DebuggerState.Failed(t.message ?: t.javaClass.simpleName)
@@ -142,6 +152,7 @@ class LldbDapDebuggerService(
         trampolineBinary: File,
         userLibrary: File,
         projectRoot: File,
+        stdinFlow: Flow<String>?,
     ) {
         // Canonicalize + ensure trailing separator so prefix matching
         // is correct (e.g. "/foo/bar" must not match "/foo/barbaz").
@@ -172,11 +183,36 @@ class LldbDapDebuggerService(
         conn.start()
 
         val sessionScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-        val newSession = Session(process = proc, conn = conn, scope = sessionScope)
+
+        // Create the stdin FIFO if the caller wants to feed input. The
+        // trampoline (not lldb) opens this FIFO read-only via the
+        // CPPIDE_STDIN_FIFO env var; we open the write side from a
+        // session coroutine after launch so the writer doesn't deadlock
+        // waiting for a reader that may never attach.
+        val stdinFifo: File? = if (stdinFlow != null) {
+            val f = File(workingDir, "lldb_stdin_${System.currentTimeMillis()}.fifo")
+            f.delete()
+            try {
+                android.system.Os.mkfifo(f.absolutePath, FIFO_MODE_OWNER_RW)
+                f
+            } catch (t: Throwable) {
+                Log.w(TAG, "mkfifo failed — inferior will run with default stdin", t)
+                null
+            }
+        } else null
+
+        val newSession = Session(
+            process = proc,
+            conn = conn,
+            scope = sessionScope,
+            stdinFifo = stdinFifo,
+        )
         session = newSession
 
-        // stderr drainer — logs lldb-dap diagnostics to logcat and to
-        // [output] so they show up in the user's terminal panel.
+        // stderr drainer — logs lldb-dap diagnostics to logcat only.
+        // lldb-dap's stderr is noisy startup chatter the user didn't
+        // ask for; keeping it out of the terminal panel means only
+        // the program's own stdout/stderr surfaces there.
         sessionScope.launch {
             try {
                 BufferedReader(InputStreamReader(proc.errorStream, StandardCharsets.UTF_8))
@@ -184,7 +220,6 @@ class LldbDapDebuggerService(
                         while (isActive) {
                             val line = r.readLine() ?: break
                             Log.i(TAG, "lldb-dap[stderr] $line")
-                            _output.tryEmit("[lldb-dap] $line\n")
                         }
                     }
             } catch (_: Throwable) {
@@ -258,6 +293,11 @@ class LldbDapDebuggerService(
                     for ((k, v) in paths.processEnv(workingDir)) {
                         put("$k=$v")
                     }
+                    if (stdinFifo != null) {
+                        // Trampoline reads this, opens the FIFO, and
+                        // passes the fd as in_fd to run_user_main.
+                        put("CPPIDE_STDIN_FIFO=${stdinFifo.absolutePath}")
+                    }
                 })
                 // Send raw lldb commands at multiple lifecycle points to
                 // maximize the chance one of them lands. lldb keeps
@@ -283,6 +323,13 @@ class LldbDapDebuggerService(
             "body=${launchResp.optJSONObject("body")?.toString()?.take(500)}")
         require(launchResp.optBoolean("success")) {
             "launch failed: ${launchResp.optString("message")}"
+        }
+
+        // open(O_WRONLY) on a FIFO blocks until a reader attaches. Do
+        // the open on the session scope with O_NONBLOCK + retry so a
+        // crashed inferior can't wedge an IO thread indefinitely.
+        if (stdinFifo != null && stdinFlow != null) {
+            sessionScope.launch { pumpStdinToFifo(stdinFifo, stdinFlow) }
         }
 
         // The server emits an `initialized` event after the launch
@@ -332,6 +379,49 @@ class LldbDapDebuggerService(
             }
         } catch (_: Throwable) {}
         try { s.scope.cancel() } catch (_: Throwable) {}
+        s.stdinFifo?.let { fifo ->
+            try { fifo.delete() } catch (_: Throwable) {}
+        }
+    }
+
+    private suspend fun pumpStdinToFifo(fifo: File, flow: Flow<String>) {
+        val fd = try {
+            openFifoWriteWithRetry(fifo)
+        } catch (_: CancellationException) {
+            return
+        } catch (t: Throwable) {
+            Log.w(TAG, "stdin FIFO writer could not open ${fifo.absolutePath}", t)
+            return
+        }
+        try {
+            flow.pumpUtf8Into(FileOutputStream(fd))
+        } catch (_: CancellationException) {
+            // normal shutdown
+        } catch (t: Throwable) {
+            Log.w(TAG, "stdin FIFO writer died", t)
+        }
+    }
+
+    private suspend fun openFifoWriteWithRetry(fifo: File): java.io.FileDescriptor {
+        val deadline = System.nanoTime() + FIFO_OPEN_TIMEOUT_MS * 1_000_000L
+        while (true) {
+            currentCoroutineContext()[Job]?.ensureActive()
+            try {
+                return android.system.Os.open(
+                    fifo.absolutePath,
+                    android.system.OsConstants.O_WRONLY or android.system.OsConstants.O_NONBLOCK,
+                    0,
+                )
+            } catch (e: android.system.ErrnoException) {
+                if (e.errno != android.system.OsConstants.ENXIO) throw e
+                if (System.nanoTime() >= deadline) {
+                    throw java.io.IOException(
+                        "FIFO reader never attached within ${FIFO_OPEN_TIMEOUT_MS}ms", e,
+                    )
+                }
+                delay(50)
+            }
+        }
     }
 
     // ---- DebuggerService: step / continue / pause ----
@@ -557,16 +647,17 @@ class LldbDapDebuggerService(
                 replayBreakpointsOnInitialized()
             }
             "output" -> {
+                // Only forward the inferior's own stdout/stderr to the
+                // terminal. Drop category=console / telemetry / important:
+                // that's lldb's own chatter (`Running initCommands:`,
+                // `(lldb) breakpoint set ...`, `Breakpoint 1: no locations
+                // (pending)`, etc.) which belongs in logcat, not in the
+                // user's output panel.
                 val body = event.optJSONObject("body") ?: return
                 val category = body.optString("category", "console")
                 val text = body.optString("output", "")
-                if (text.isNotEmpty()) {
-                    if (category == "stderr" || category == "stdout") {
-                        _output.tryEmit(text)
-                    } else {
-                        // console / telemetry / important — surface with a prefix
-                        _output.tryEmit("[$category] $text")
-                    }
+                if (text.isNotEmpty() && (category == "stdout" || category == "stderr")) {
+                    _output.tryEmit(text)
                 }
             }
             "stopped" -> handleStopped(event)
@@ -776,5 +867,16 @@ class LldbDapDebuggerService(
          * in a non-user-code loop and should surface it.
          */
         private const val MAX_AUTO_CONTINUE_HOPS = 20
+
+        /**
+         * How long the stdin FIFO writer polls for a reader before giving
+         * up. If the inferior hasn't opened the read end within this
+         * window it almost certainly crashed during launch, so stdin
+         * will never be read anyway.
+         */
+        private const val FIFO_OPEN_TIMEOUT_MS = 10_000L
+
+        /** `rw-------` for the owner; FIFO is private to this app UID. */
+        private const val FIFO_MODE_OWNER_RW = 6 shl 6
     }
 }

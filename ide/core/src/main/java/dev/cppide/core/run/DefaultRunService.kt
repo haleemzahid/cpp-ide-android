@@ -2,24 +2,21 @@ package dev.cppide.core.run
 
 import android.os.ParcelFileDescriptor
 import dev.cppide.core.common.DispatcherProvider
+import dev.cppide.core.common.pumpUtf8Into
 import dev.cppide.core.jni.NativeBridge
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.async
-import kotlinx.coroutines.channels.awaitClose
-import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.channelFlow
-import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * Default in-process runner. Creates two anonymous pipes, hands the write
- * ends to the JNI bridge which dup2's them onto stdout/stderr inside the
- * dlopen'd user library, and streams the read ends as [RunEvent.Stdout] /
- * [RunEvent.Stderr] chunks.
+ * Default in-process runner. Creates three anonymous pipes, hands the
+ * stdout/stderr write ends and the stdin read end to the JNI bridge which
+ * dup2's them onto the inferior's std{in,out,err}. Streams the stdout /
+ * stderr read ends as [RunEvent.Stdout] / [RunEvent.Stderr] chunks, and
+ * forwards any emissions from [RunConfig.stdin] to the stdin pipe so the
+ * user's `cin` sees them.
  */
 class DefaultRunService(
     private val dispatchers: DispatcherProvider,
@@ -55,13 +52,25 @@ class DefaultRunService(
             send(RunEvent.Failed("pipe(stderr) failed: ${t.message}", System.currentTimeMillis() - started))
             return@channelFlow
         }
+        // fd=-1 means "leave inferior's stdin closed" — cin returns EOF on first read.
+        val stdinPipe = if (config.stdin != null) {
+            try {
+                ParcelFileDescriptor.createPipe()
+            } catch (t: Throwable) {
+                stdoutPipe.forEach { it.close() }
+                stderrPipe.forEach { it.close() }
+                send(RunEvent.Failed("pipe(stdin) failed: ${t.message}", System.currentTimeMillis() - started))
+                return@channelFlow
+            }
+        } else null
 
         val stdoutRead = stdoutPipe[0]
         val stdoutWriteFd = stdoutPipe[1].detachFd()
         val stderrRead = stderrPipe[0]
         val stderrWriteFd = stderrPipe[1].detachFd()
+        val stdinReadFd = stdinPipe?.get(0)?.detachFd() ?: -1
+        val stdinWrite = stdinPipe?.get(1)
 
-        // Reader coroutines pipe output as it arrives.
         val stdoutJob = launch(dispatchers.io) {
             ParcelFileDescriptor.AutoCloseInputStream(stdoutRead).use { input ->
                 val buf = ByteArray(4096)
@@ -83,10 +92,27 @@ class DefaultRunService(
             }
         }
 
+        val stdinJob = if (stdinWrite != null && config.stdin != null) {
+            launch(dispatchers.io) {
+                try {
+                    config.stdin.pumpUtf8Into(
+                        ParcelFileDescriptor.AutoCloseOutputStream(stdinWrite),
+                    )
+                } catch (_: CancellationException) {
+                    // normal shutdown
+                }
+            }
+        } else null
+
         // Run the program on the IO dispatcher — blocks until user main returns.
         val rc = withContext(dispatchers.io) {
             try {
-                NativeBridge.runUserProgram(config.library.absolutePath, stdoutWriteFd, stderrWriteFd)
+                NativeBridge.runUserProgram(
+                    config.library.absolutePath,
+                    stdinReadFd,
+                    stdoutWriteFd,
+                    stderrWriteFd,
+                )
             } catch (t: Throwable) {
                 -9999
             } finally {
@@ -96,6 +122,10 @@ class DefaultRunService(
             }
         }
 
+        // Stop the stdin pump before joining readers so its AutoCloseOutputStream
+        // releases the write-end; otherwise collect{} can keep it open.
+        stdinJob?.cancel()
+        stdinJob?.join()
         stdoutJob.join()
         stderrJob.join()
 

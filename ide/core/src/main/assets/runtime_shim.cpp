@@ -22,14 +22,18 @@
 int user_main_fn() __attribute__((weak));
 int user_main_fn(int argc, char** argv) __attribute__((weak));
 
-extern "C" int run_user_main(int argc, char** argv, int out_fd, int err_fd) {
+extern "C" int run_user_main(int argc, char** argv, int in_fd, int out_fd, int err_fd) {
+    int saved_stdin  = dup(STDIN_FILENO);
     int saved_stdout = dup(STDOUT_FILENO);
     int saved_stderr = dup(STDERR_FILENO);
 
+    if (in_fd  >= 0) dup2(in_fd,  STDIN_FILENO);
     if (out_fd >= 0) dup2(out_fd, STDOUT_FILENO);
     if (err_fd >= 0) dup2(err_fd, STDERR_FILENO);
 
-    // Unbuffered so output is visible in the UI immediately.
+    // Unbuffered stdout/stderr so output is visible in the UI immediately.
+    // stdin stays line-buffered — that's what cin >> x and getline expect,
+    // and it matches desktop terminal behavior.
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
 
@@ -52,6 +56,10 @@ extern "C" int run_user_main(int argc, char** argv, int out_fd, int err_fd) {
     fflush(stdout);
     fflush(stderr);
 
+    if (saved_stdin >= 0) {
+        dup2(saved_stdin, STDIN_FILENO);
+        close(saved_stdin);
+    }
     if (saved_stdout >= 0) {
         dup2(saved_stdout, STDOUT_FILENO);
         close(saved_stdout);

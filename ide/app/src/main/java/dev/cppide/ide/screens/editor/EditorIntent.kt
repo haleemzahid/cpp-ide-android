@@ -35,6 +35,10 @@ sealed interface EditorIntent {
     data class SwitchBottomTab(val tab: BottomPanelTab) : EditorIntent
     data class JumpToDiagnostic(val diagnostic: Diagnostic) : EditorIntent
     data object ClearTerminal : EditorIntent
+    /** User typed a line in the terminal input and hit send — the text
+     *  is piped to the running inferior's stdin (a trailing newline is
+     *  appended by the ViewModel so `cin >> x` and `getline` unblock). */
+    data class SendTerminalInput(val text: String) : EditorIntent
 
     // debug
     data object StartDebug : EditorIntent

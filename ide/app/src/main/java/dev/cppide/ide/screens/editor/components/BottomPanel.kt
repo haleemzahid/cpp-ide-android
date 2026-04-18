@@ -32,9 +32,13 @@ fun BottomPanel(
     expandedVariableRefs: Set<Int>,
     chatState: ChatPanelState,
     isCppFile: Boolean,
+    /** True while a program is running — enables the stdin input row. */
+    isRunning: Boolean,
     onSelectTab: (BottomPanelTab) -> Unit,
     onClose: () -> Unit,
     onClearTerminal: () -> Unit,
+    /** Called when the user types a line + Enter in the terminal input. */
+    onSendTerminalInput: (String) -> Unit,
     onJumpToProblem: (Diagnostic) -> Unit,
     onToggleVariableExpansion: (Int) -> Unit,
     onChatInputChange: (String) -> Unit,
@@ -64,7 +68,11 @@ fun BottomPanel(
         CppHorizontalDivider()
         Box(modifier = Modifier.fillMaxWidth().height(contentHeight)) {
             when (activeTab) {
-                BottomPanelTab.Terminal -> TerminalView(lines = terminalLines)
+                BottomPanelTab.Terminal -> TerminalView(
+                    lines = terminalLines,
+                    inputEnabled = isRunning,
+                    onSendInput = onSendTerminalInput,
+                )
                 BottomPanelTab.Problems -> ProblemsList(
                     problems = problems,
                     onJumpTo = onJumpToProblem,
@@ -81,6 +89,7 @@ fun BottomPanel(
                     inputText = chatState.input,
                     isSending = chatState.isSending,
                     isLoading = chatState.isLoading,
+                    sendError = chatState.sendError,
                     isCppFile = isCppFile,
                     onInputChange = onChatInputChange,
                     onSend = onChatSend,
