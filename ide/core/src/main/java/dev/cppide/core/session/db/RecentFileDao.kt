@@ -23,4 +23,10 @@ internal interface RecentFileDao {
 
     @Query("DELETE FROM recent_files WHERE filePath = :filePath")
     suspend fun delete(filePath: String)
+
+    /** Purges every recent-file row that belongs to [projectRoot]. Called
+     *  when a project is deleted so its files don't linger on the welcome
+     *  screen and crash on tap with FileNotFoundException. */
+    @Query("DELETE FROM recent_files WHERE projectRoot = :projectRoot")
+    suspend fun deleteByProjectRoot(projectRoot: String)
 }

@@ -112,7 +112,7 @@ fun FloatingDebugPanel(
                 .offset { IntOffset(dragOffset.x.roundToInt(), dragOffset.y.roundToInt()) }
                 .onSizeChanged { panelSize = it }
                 .background(
-                    color = Color(0xCC1F1F22),
+                    color = colors.surfaceElevated.copy(alpha = 0.92f),
                     shape = RoundedCornerShape(24.dp),
                 )
                 .padding(horizontal = 4.dp, vertical = 4.dp),
@@ -152,7 +152,7 @@ fun FloatingDebugPanel(
                     Codicon(
                         char = Codicons.GRIPPER,
                         size = 16.sp,
-                        color = Color(0xFF8E8E90),
+                        color = colors.textDisabled,
                     )
                 }
             // Continue ↔ Pause toggle occupies the same slot, matching
@@ -160,13 +160,12 @@ fun FloatingDebugPanel(
             if (isRunning) {
                 ToolbarButton(
                     icon = Codicons.DEBUG_PAUSE,
-                    contentColor = Color(0xFFE6E6E6),
                     onClick = { onIntent(EditorIntent.DebugPause) },
                 )
             } else {
                 ToolbarButton(
                     icon = Codicons.DEBUG_CONTINUE,
-                    contentColor = if (isStopped) Color(0xFF89D185) else Color(0xFFE6E6E6),
+                    contentColor = if (isStopped) colors.accent else colors.textPrimary,
                     enabled = isStopped,
                     onClick = { onIntent(EditorIntent.DebugContinue) },
                 )
@@ -189,7 +188,7 @@ fun FloatingDebugPanel(
             )
             ToolbarButton(
                 icon = Codicons.DEBUG_STOP,
-                contentColor = Color(0xFFF14C4C),
+                contentColor = colors.diagnosticError,
                 onClick = { onIntent(EditorIntent.DebugStop) },
             )
             }
@@ -230,7 +229,7 @@ private fun ToolbarButton(
     icon: Char,
     onClick: () -> Unit,
     enabled: Boolean = true,
-    contentColor: Color = Color(0xFFE6E6E6),
+    contentColor: Color = CppIde.colors.textPrimary,
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     Box(

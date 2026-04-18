@@ -18,6 +18,7 @@ fun ExercisesRoute(
     core: Core,
     onBack: () -> Unit,
     onOpenProject: (Project) -> Unit,
+    onLogin: () -> Unit,
 ) {
     val viewModel = remember(core) { ExercisesViewModel(core) }
     val state by viewModel.state.collectAsState()
@@ -25,6 +26,14 @@ fun ExercisesRoute(
     LaunchedEffect(viewModel) {
         viewModel.openProject.collect { project -> onOpenProject(project) }
     }
+    LaunchedEffect(viewModel) {
+        viewModel.requireLogin.collect { onLogin() }
+    }
+    // Re-probe the on-disk catalog every time the screen mounts —
+    // the user may have deleted a downloaded project from the Welcome
+    // screen since they last visited, and the status pill needs to
+    // flip back from "Open" to "Download".
+    LaunchedEffect(Unit) { viewModel.refresh() }
 
     ExercisesScreen(
         state = state,

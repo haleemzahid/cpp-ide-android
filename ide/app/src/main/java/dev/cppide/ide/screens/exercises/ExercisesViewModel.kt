@@ -36,6 +36,11 @@ class ExercisesViewModel(
     private val _openProject = MutableSharedFlow<Project>(extraBufferCapacity = 2)
     val openProject: SharedFlow<Project> = _openProject.asSharedFlow()
 
+    /** Fired when the user tries to download without a session —
+     *  the route routes to the Auth screen and the user can come back. */
+    private val _requireLogin = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    val requireLogin: SharedFlow<Unit> = _requireLogin.asSharedFlow()
+
     private val projectsRoot = File(core.context.filesDir, "projects")
 
     init {
@@ -47,17 +52,26 @@ class ExercisesViewModel(
             _state.update { it.copy(loading = true, errorMessage = null) }
             core.exercisesApi.listCategories()
                 .onSuccess { categories ->
-                    // Check which categories are already downloaded on disk.
-                    val existing = categories
+                    // Source-of-truth `Done` status comes from the on-disk
+                    // folder; a category whose folder was deleted (e.g.
+                    // from the Welcome screen) must fall back to
+                    // `Download`, not linger as `Done`. Transient user-
+                    // initiated states (Downloading, Failed) are kept so
+                    // an in-flight download's progress UI survives a
+                    // pull-to-refresh.
+                    val onDisk = categories
                         .filter { File(projectsRoot, sanitise(it.slug)).exists() }
                         .associate { it.slug to DownloadStatus.Done }
+                    val inFlight = _state.value.statusBySlug.filterValues { s ->
+                        s == DownloadStatus.Downloading || s == DownloadStatus.Failed
+                    }
                     _state.update {
                         it.copy(
                             loading = false,
                             categories = categories.sortedWith(
                                 compareBy({ it.orderIndex }, { it.title }),
                             ),
-                            statusBySlug = existing + it.statusBySlug,
+                            statusBySlug = onDisk + inFlight,
                         )
                     }
                 }
@@ -82,6 +96,14 @@ class ExercisesViewModel(
      * editor with the whole category as a single multi-folder project.
      */
     fun downloadCategory(categorySlug: String) {
+        // Downloads are server-authenticated (the catalog API requires a
+        // bearer token even for public categories, because the response
+        // embeds per-student progress). Route the user through Auth
+        // before kicking off any network work.
+        if (core.studentAuth.token == null) {
+            _requireLogin.tryEmit(Unit)
+            return
+        }
         viewModelScope.launch {
             _state.update { s ->
                 s.copy(statusBySlug = s.statusBySlug + (categorySlug to DownloadStatus.Downloading))

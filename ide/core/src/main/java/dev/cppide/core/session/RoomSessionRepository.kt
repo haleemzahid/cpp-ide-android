@@ -40,7 +40,13 @@ class RoomSessionRepository(
         withContext(dispatchers.io) { projectDao.setPinned(rootPath, pinned) }
 
     override suspend fun forget(rootPath: String) =
-        withContext(dispatchers.io) { projectDao.delete(rootPath) }
+        withContext(dispatchers.io) {
+            projectDao.delete(rootPath)
+            // Purge any recent-file rows that pointed into this project
+            // too. Without this, the welcome screen's "Recent files"
+            // strip keeps showing entries that 404 on tap.
+            fileDao.deleteByProjectRoot(rootPath)
+        }
 
     // ---- recent files ----
 

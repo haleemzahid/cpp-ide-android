@@ -219,6 +219,12 @@ class DebugCodeEditor @JvmOverloads constructor(
                     // translated into at the top of onDraw.
                     val lineLength = text.getColumnCount(zeroIdx)
                     val endX = getOffset(zeroIdx, lineLength) - offsetX + leftPadding
+                    // Clip on both sides of the text region. When the
+                    // user scrolls right past a short line, its
+                    // end-of-text falls behind the gutter and the label
+                    // would render on top of the line numbers / the
+                    // next line's code. Clip to `[gutterWidth, viewW]`.
+                    if (endX <= gutterWidth || endX >= viewW) continue
                     val label = formatInlineLabel(entries)
                     canvas.drawText(label, endX, top + baselineOffset, inlineValuePaint)
                 }

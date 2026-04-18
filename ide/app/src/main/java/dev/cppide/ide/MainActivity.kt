@@ -111,7 +111,15 @@ private fun AppNavigation(core: Core) {
             OnboardingScreen(
                 onFinish = {
                     prefs.edit().putBoolean("seen", true).apply()
-                    navController.navigate(Routes.WELCOME) {
+                    // Route through Auth first so the login screen
+                    // still shows on the very first launch. The
+                    // startDest-level decision (AUTH vs WELCOME) is
+                    // evaluated at app start, not after onboarding
+                    // completes — so navigating straight to WELCOME
+                    // here silently bypassed the auth step.
+                    val next = if (!isLoggedIn && !hasSkippedAuth) Routes.AUTH
+                    else Routes.WELCOME
+                    navController.navigate(next) {
                         popUpTo(Routes.ONBOARDING) { inclusive = true }
                     }
                 },
@@ -201,6 +209,7 @@ private fun AppNavigation(core: Core) {
                 onOpenProject = { project ->
                     navController.navigate(Routes.editor(project))
                 },
+                onLogin = { navController.navigate(Routes.AUTH) },
             )
         }
         composable(Routes.QUESTIONS) {

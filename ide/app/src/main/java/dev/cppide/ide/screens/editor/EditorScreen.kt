@@ -256,16 +256,15 @@ fun EditorScreen(
                     isRunning = state.runState == RunState.Running ||
                         (state.debuggerState.isActive &&
                             state.debuggerState !is dev.cppide.core.debug.DebuggerState.Stopped),
-                    // Auto-open the IME whenever the program is truly
-                    // executing. This mirrors `isRunning` exactly —
-                    // during a Debug pause (`Stopped`) the input row
-                    // is disabled, and we also actively dismiss the
-                    // keyboard in TerminalView when `inputEnabled`
-                    // flips false, so a brief Running window during
-                    // step-over can't leave a stale IME open.
-                    autoShowKeyboard = state.runState == RunState.Running ||
-                        (state.debuggerState.isActive &&
-                            state.debuggerState !is dev.cppide.core.debug.DebuggerState.Stopped),
+                    // Auto-open the IME only during a plain Run.
+                    // During a Debug session a step briefly passes
+                    // through `Running` on its way back to `Stopped`,
+                    // and auto-showing on that transient window makes
+                    // the keyboard flash open and shut on every step.
+                    // The user can tap the terminal to type during
+                    // debug (which is the only time they'd want to).
+                    autoShowKeyboard = state.runState == RunState.Running &&
+                        !state.debuggerState.isActive,
                     onSelectTab = { onIntent(EditorIntent.SwitchBottomTab(it)) },
                     onClose = { onIntent(EditorIntent.ToggleBottomPanel) },
                     onClearTerminal = { onIntent(EditorIntent.ClearTerminal) },
