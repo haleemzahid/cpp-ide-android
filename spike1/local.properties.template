@@ -1,3 +1,0 @@
-# Rename this to local.properties (gitignored) and edit if your Android SDK
-# lives somewhere other than the default. NDK version is set in app/build.gradle.kts.
-sdk.dir=C:\\Program Files (x86)\\Android\\android-sdk
