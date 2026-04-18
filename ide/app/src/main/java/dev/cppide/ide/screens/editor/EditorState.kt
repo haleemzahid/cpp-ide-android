@@ -48,6 +48,29 @@ data class EditorState(
     val debuggerState: DebuggerState = DebuggerState.Idle,
     /** All user breakpoints, keyed by (file, line). Survives debug sessions. */
     val breakpoints: Map<SourceBreakpoint, BreakpointState> = emptyMap(),
+    /**
+     * Variable scopes for the top frame of the current stop, fetched
+     * lazily from the debugger after each `stopped` event. Empty when
+     * not stopped or fetch is in flight. Each scope holds its own
+     * variables — UI fetches them on expand.
+     */
+    val debugScopes: List<dev.cppide.core.debug.Scope> = emptyList(),
+    /**
+     * Variables under each scope (or nested variable), indexed by the
+     * DAP variablesReference handle. Tree expansion adds entries as
+     * the user taps to drill down.
+     */
+    val debugVariables: Map<Int, List<dev.cppide.core.debug.Variable>> = emptyMap(),
+    /** UI tree state: which variablesReference handles are currently expanded. */
+    val expandedVariableRefs: Set<Int> = emptySet(),
+    /**
+     * Inline variable values to paint in the editor margin while the
+     * debugger is stopped, keyed by absolute file path → 1-indexed
+     * source line → entries for that line. Populated only for lines
+     * within the current function; cleared when the debugger resumes
+     * or detaches. See [InlineDebugValue] for the per-entry shape.
+     */
+    val inlineDebugValues: Map<String, Map<Int, List<InlineDebugValue>>> = emptyMap(),
 
     // ---- chat ----
     val chatState: ChatPanelState = ChatPanelState(),
@@ -84,6 +107,15 @@ data class EditorState(
     val allProblems: List<Diagnostic>
         get() = problems + lspDiagnostics.map { it.toBuildDiagnostic() }
 
+    /** Inline debug values for the open file, or empty when not
+     *  stopped in it. 1-indexed line → entries for that line. */
+    val inlineDebugValuesForOpenFile: Map<Int, List<InlineDebugValue>>
+        get() {
+            val rel = openFile?.relativePath ?: return emptyMap()
+            val absPath = java.io.File(project.root, rel).absolutePath
+            return inlineDebugValues[absPath] ?: emptyMap()
+        }
+
     /** Breakpoints that apply to whatever file is currently open,
      *  indexed by 1-based line so the editor gutter can look them up
      *  in O(1) while rendering. */
@@ -113,6 +145,18 @@ data class OpenFile(
     val isDirty: Boolean get() = content != savedContent
 }
 
+/**
+ * One value to show inline at the end of a source line during a
+ * debugger pause. `name` is the identifier as it appears in source
+ * (e.g. `count`, `argv`); `value` is the debugger's rendered
+ * representation (lldb-dap string — already pretty-printed for
+ * ints, floats, strings, and container summaries).
+ */
+data class InlineDebugValue(
+    val name: String,
+    val value: String,
+)
+
 enum class RunState {
     Idle,
     InstallingToolchain,
@@ -120,7 +164,7 @@ enum class RunState {
     Running,
 }
 
-enum class BottomPanelTab { Terminal, Problems, Debug, Chat }
+enum class BottomPanelTab { Terminal, Problems, Variables, Chat }
 
 data class ChatPanelState(
     val messages: List<ChatMessage> = emptyList(),
@@ -128,4 +172,6 @@ data class ChatPanelState(
     val isSending: Boolean = false,
     val isLoading: Boolean = false,
     val unreadCount: Int = 0,
+    /** Last send error for inline display in the chat panel. */
+    val sendError: String? = null,
 )

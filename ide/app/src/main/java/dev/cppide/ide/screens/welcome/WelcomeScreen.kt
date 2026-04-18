@@ -21,6 +21,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.automirrored.outlined.Login
 import androidx.compose.material.icons.outlined.Logout
 import androidx.compose.material.icons.outlined.QuestionAnswer
 import androidx.compose.material3.Badge
@@ -48,6 +49,7 @@ fun WelcomeScreen(
     recents: List<RecentProject>,
     recentFiles: List<RecentFile>,
     studentName: String?,
+    isLoggedIn: Boolean,
     totalUnread: Int,
     isUploading: Boolean,
     uploadResult: String?,
@@ -61,6 +63,7 @@ fun WelcomeScreen(
     onUploadSolutions: () -> Unit,
     onAbout: () -> Unit,
     onLogout: () -> Unit,
+    onLogin: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val colors = CppIde.colors
@@ -73,6 +76,7 @@ fun WelcomeScreen(
     ) {
         CppTopBar(
             title = if (studentName != null) "Hi, $studentName" else "C++ IDE",
+            subtitle = if (!isLoggedIn) "Tap the login icon to sync progress & chat" else null,
             trailing = {
                 Row {
                     BadgedBox(
@@ -93,11 +97,19 @@ fun WelcomeScreen(
                         contentDescription = "About",
                         onClick = onAbout,
                     )
-                    CppIconButton(
-                        icon = Icons.Outlined.Logout,
-                        contentDescription = "Log out",
-                        onClick = onLogout,
-                    )
+                    if (isLoggedIn) {
+                        CppIconButton(
+                            icon = Icons.Outlined.Logout,
+                            contentDescription = "Log out",
+                            onClick = onLogout,
+                        )
+                    } else {
+                        CppIconButton(
+                            icon = Icons.AutoMirrored.Outlined.Login,
+                            contentDescription = "Log in",
+                            onClick = onLogin,
+                        )
+                    }
                 }
             },
         )

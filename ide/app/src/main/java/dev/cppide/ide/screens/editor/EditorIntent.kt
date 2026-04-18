@@ -35,9 +35,21 @@ sealed interface EditorIntent {
     data class SwitchBottomTab(val tab: BottomPanelTab) : EditorIntent
     data class JumpToDiagnostic(val diagnostic: Diagnostic) : EditorIntent
     data object ClearTerminal : EditorIntent
+    /** User typed a line in the terminal input and hit send — the text
+     *  is piped to the running inferior's stdin (a trailing newline is
+     *  appended by the ViewModel so `cin >> x` and `getline` unblock). */
+    data class SendTerminalInput(val text: String) : EditorIntent
 
     // debug
     data object StartDebug : EditorIntent
+    /** Step over the current source line (F10 in VSCode). */
+    data object DebugStepOver : EditorIntent
+    /** Step into the function call on the current line (F11). */
+    data object DebugStepInto : EditorIntent
+    /** Step out of the current function (Shift+F11). */
+    data object DebugStepOut : EditorIntent
+    /** Legacy "Step" intent — kept as alias for the existing DebugPanel button.
+     *  New UI uses the three explicit step intents above. */
     data object DebugStep : EditorIntent
     data object DebugContinue : EditorIntent
     data object DebugPause : EditorIntent
@@ -46,6 +58,9 @@ sealed interface EditorIntent {
     /** Remove a specific breakpoint by (file, line) regardless of
      *  currently-open file. Used by the Debug panel's breakpoint list. */
     data class RemoveBreakpoint(val breakpoint: SourceBreakpoint) : EditorIntent
+    /** Expand or collapse a variable in the Variables panel. The
+     *  reference is the DAP variablesReference handle for the entry. */
+    data class ToggleVariableExpansion(val variablesReference: Int) : EditorIntent
 
     // chat
     data class UpdateChatInput(val text: String) : EditorIntent

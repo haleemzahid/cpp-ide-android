@@ -29,15 +29,22 @@ import json
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLOSURE = os.path.join(HERE, "closure")
 
-# Destination module's src/main/ dir. Defaults to spike1 for backward compat,
-# override with: python stage_toolchain.py <abs path to src/main>
+# Destination module's src/main/ dir for jniLibs. Defaults to spike1 for
+# backward compat, override with: python stage_toolchain.py <abs path to src/main>
 SPIKE1 = (
     sys.argv[1] if len(sys.argv) > 1
     else os.path.normpath(os.path.join(HERE, "..", "spike1", "app", "src", "main"))
 )
 
+# Optional second arg: src/main/ dir for the asset pack module (where
+# termux.zip lands). If omitted, falls back to SPIKE1/assets/ — the old
+# layout. The Play-Store-compliant build splits termux.zip into a separate
+# install-time asset pack module so the base APK stays under 150 MB; pass
+# the asset pack module's src/main as argv[2] in that setup.
+ASSETS_ROOT = sys.argv[2] if len(sys.argv) > 2 else SPIKE1
+
 JNILIBS = os.path.join(SPIKE1, "jniLibs", "arm64-v8a")
-ASSETS = os.path.join(SPIKE1, "assets")
+ASSETS = os.path.join(ASSETS_ROOT, "assets")
 
 TERMUX_USR = "data/data/data/com.termux/files/usr"  # prefix under each extracted pkg
 
@@ -76,12 +83,20 @@ def stage_jnilibs():
     src = termux_path("clang", "bin", "clangd")
     copy(src, os.path.join(JNILIBS, "libclangd.so"))
 
-    # 4. lldb-server executable -> libLLDBServer.so (GDB-remote debug
-    # server for step debugging). NOT the full lldb CLI — that would drag
-    # in python/openssl/ncurses/etc. lldb-server itself only needs libz,
-    # liblzma.5, and the libLLVM/libclang-cpp/libc++ we already ship.
+    # 4. lldb-server executable -> libLLDBServer.so (legacy GDB-remote path,
+    # kept temporarily for the old Kotlin debugger until lldb-dap lands).
     src = termux_path("lldb", "bin", "lldb-server")
     copy(src, os.path.join(JNILIBS, "libLLDBServer.so"))
+
+    # 4b. lldb-dap executable -> libLLDBDAP.so (DAP debug adapter for
+    # VSCode-quality debugging: proper step over/into/out, call stack,
+    # variables, watch, hover eval). The binary itself is ~900 KB, but it
+    # dlopens liblldb.so (17 MB) which pulls in libpython3.13 + stdlib +
+    # icu + openssl + ncurses. Those all live in termux.zip, not jniLibs,
+    # so they ride the normal APK zip compression path instead of being
+    # extracted as raw uncompressed .so files.
+    src = termux_path("lldb", "bin", "lldb-dap")
+    copy(src, os.path.join(JNILIBS, "libLLDBDAP.so"))
 
     # 5. Shared libraries with clean names (loaded by the dynamic linker at
     # exec time — sonames are unversioned so AGP's lib*.so packager accepts).
@@ -118,27 +133,46 @@ def stage_assets_zip():
         "libLLVM.so",
     }
 
+    # Sonames we replace with hand-built stubs from stubs/ instead of
+    # shipping the real library. Used for libicudata.so.78, which is
+    # 33 MB of Unicode data tables that embedded lldb-dap never actually
+    # reads (ICU is only reachable via libxml2, which for lldb's XML
+    # parsing needs ASCII/UTF-8 only). The stub exports an empty
+    # `icudt78_dat` symbol so the linker accepts it; ICU returns
+    # invalid-data errors if anything tries to look up a code point,
+    # but nothing in the hot path does.
+    STUB_REPLACEMENTS = {
+        "libicudata.so.78": os.path.join(HERE, "stubs", "libicudata.so.78"),
+    }
+
     entries = []
 
     # 1) Versioned-soname libs from the closure
     for soname, info in manifest["libs"].items():
         if soname in already_in_jnilibs:
             continue
+        stub = STUB_REPLACEMENTS.get(soname)
+        if stub is not None and os.path.exists(stub):
+            real_size = os.path.getsize(info["path"])
+            stub_size = os.path.getsize(stub)
+            print(f"  [stub] {soname}: {real_size:,} -> {stub_size:,} bytes "
+                  f"(saves {(real_size - stub_size) / (1024*1024):.1f} MB)")
+            entries.append((stub, f"lib/{soname}"))
+            continue
         path = info["path"]
         arcname = f"lib/{soname}"
         entries.append((path, arcname))
 
-    # 1b) lldb-server's extra dep not in the resolver closure. We don't
-    # put lldb in the resolver's initial set because doing so drags in
-    # liblldb.so → python3.13 → openssl → ncurses → ... (200 MB of stuff
-    # lldb-server itself doesn't touch). Instead, we stage lldb-server
-    # manually and add only its one extra DT_NEEDED entry here.
-    lzma_path = termux_path("liblzma", "lib", "liblzma.so.5.8.3")
-    if os.path.exists(lzma_path):
-        entries.append((lzma_path, "lib/liblzma.so.5"))
+    # 1b) liblldb.so — not in the manifest because the resolver only walks
+    # DT_NEEDED of .so files, and liblldb.so is NEEDED only by the lldb-dap
+    # executable (which isn't walked). Stage it manually. ~17 MB uncompressed,
+    # compresses to ~6 MB inside termux.zip.
+    lldb_so = termux_path("lldb", "lib", "liblldb.so")
+    if os.path.exists(lldb_so):
+        entries.append((lldb_so, "lib/liblldb.so"))
     else:
-        print(f"  [WARN] liblzma.so.5 not found at {lzma_path} — "
-              "lldb-server will fail to load")
+        print(f"  [WARN] liblldb.so not found at {lldb_so} — "
+              "lldb-dap will fail to launch")
 
     # 2) ndk-sysroot (Android headers + crt files + small native libs)
     # Must preserve the "usr/" prefix — clang's Android driver finds per-triple
@@ -212,6 +246,130 @@ def stage_assets_zip():
                 if not should_ship_clang_file(rel_norm):
                     continue
                 entries.append((src, rel_norm))
+
+    # 4) Python standard library (lib/python3.13) + lldb Python bindings
+    #
+    # liblldb.so has libpython3.13.so as a hard DT_NEEDED, so Python has
+    # to initialize successfully every time lldb-dap launches — even if
+    # we never run a Python script. Py_Initialize() looks for stdlib at
+    # $PYTHONHOME/lib/python3.13 (we set PYTHONHOME at runtime). Without
+    # stdlib, Python init aborts and liblldb.so refuses to load.
+    #
+    # We trim aggressively: lldb-dap only needs Python init, the lldb
+    # SBDebugger module, and a handful of formatter helpers. Whole
+    # subtrees of stdlib (networking, GUI, async, multiprocessing,
+    # email, etc.) are dead weight in the embedded scenario.
+    #
+    # SKIP_PY_DIRS — pure-Python subdirectories we drop entirely.
+    # Verified safe by tracing what lldb's site-packages/lldb/__init__.py
+    # actually imports during Py_Initialize() + SBDebugger setup.
+    # If something in here turns out to be needed, the symptom is
+    # `ModuleNotFoundError` from inside lldb-dap on stderr — easy
+    # to diagnose, just remove the offending entry.
+    SKIP_PY_DIRS = {
+        "asyncio",          # async I/O — lldb is sync
+        "concurrent",       # futures
+        "email",            # email parsing
+        "html",             # HTML parser
+        "http",             # HTTP client/server
+        "idlelib",          # IDLE editor
+        "lib2to3",          # 2-to-3 conversion (gone in 3.12+ but defensive)
+        "logging",          # surface area we never touch
+        "multiprocessing",  # subprocess management
+        "_pyrepl",          # interactive REPL — lldb has its own
+        "pydoc_data",       # help() doc strings
+        "test",             # test suite
+        "tkinter",          # GUI (not present in Termux Python anyway)
+        "turtledemo",       # graphics demos
+        "unittest",         # test framework
+        "urllib",           # URL handling
+        "venv",             # virtualenv — won't work on Android
+        "wsgiref",          # WSGI web server
+        "xml",              # Python XML — lldb uses libxml2 (C)
+        "xmlrpc",           # XML-RPC
+        "ensurepip",        # pip installer
+        "dbm",              # database modules
+    }
+
+    # SKIP_DYNLOAD_PREFIXES — C extension modules we drop from
+    # lib-dynload/. Each .so is 50-500 KB. We keep only the ones
+    # Python init / lldb actually loads.
+    SKIP_DYNLOAD_PREFIXES = (
+        "_asyncio.",            # asyncio C accelerator
+        "_multiprocessing.",
+        "_posixsubprocess.",    # only used by subprocess (kept) — but multiprocessing pulls it
+        "_elementtree.",        # XML
+        "_dbm.",                # dbm
+        "_gdbm.",               # gdbm
+        "_curses.",             # curses
+        "_curses_panel.",
+        "audioop.",
+        "_codecs_cn.",          # Chinese charset codecs — UTF-8 is enough
+        "_codecs_hk.",
+        "_codecs_iso2022.",
+        "_codecs_jp.",
+        "_codecs_kr.",
+        "_codecs_tw.",
+        "_testcapi.",           # CPython test
+        "_test",                # any other _test*
+        "_xxsubinterpreters.",
+        "_xxinterpchannels.",
+        "xxlimited.",
+        "_zoneinfo.",           # timezone DB
+        "ossaudiodev.",
+        "spwd.",
+        "syslog.",
+        "termios.",             # terminal IO — Android doesn't really have one
+        "readline.",            # GNU readline
+        "_decimal.",            # decimal arithmetic — lldb doesn't need
+        "_ctypes_test.",
+    )
+
+    def _is_skipped_dir(rel_norm: str) -> bool:
+        # rel_norm looks like "lib/python3.13/asyncio/events.py" — split
+        # off the third path segment and check membership.
+        parts = rel_norm.split("/")
+        if len(parts) >= 3 and parts[0] == "lib" and parts[1] == "python3.13":
+            return parts[2] in SKIP_PY_DIRS
+        return False
+
+    def _is_skipped_dynload(basename: str) -> bool:
+        return any(basename.startswith(p) for p in SKIP_DYNLOAD_PREFIXES)
+
+    def _walk_python_tree(pkg_name, sub_rel):
+        """Yield (src, arcname) pairs under termux_path(pkg)/lib/<sub_rel>."""
+        pkg_root = termux_path(pkg_name)
+        sub_abs = os.path.join(pkg_root, "lib", *sub_rel.split("/"))
+        if not os.path.exists(sub_abs):
+            return
+        for dirpath, dirnames, files in os.walk(sub_abs):
+            # skip __pycache__ dirs in-place (saves walk time + size)
+            dirnames[:] = [d for d in dirnames if d != "__pycache__"]
+            # skip whole stdlib subdirs we know are dead weight.
+            dirnames[:] = [d for d in dirnames if d not in SKIP_PY_DIRS]
+            for f in files:
+                if f.endswith((".pyc", ".pyo")):
+                    continue
+                src = os.path.join(dirpath, f)
+                if os.path.islink(src):
+                    continue
+                rel = os.path.relpath(src, pkg_root)
+                rel_norm = rel.replace(os.sep, "/")
+                # Belt-and-braces: re-check at the file level too.
+                if _is_skipped_dir(rel_norm):
+                    continue
+                # Drop unwanted lib-dynload C extensions.
+                if "/lib-dynload/" in rel_norm and _is_skipped_dynload(f):
+                    continue
+                yield src, rel_norm
+
+    # stdlib from python package
+    for src, arc in _walk_python_tree("python", "python3.13"):
+        entries.append((src, arc))
+
+    # lldb Python bindings from lldb package (site-packages/lldb/)
+    for src, arc in _walk_python_tree("lldb", "python3.13/site-packages/lldb"):
+        entries.append((src, arc))
 
     # Dedup by arcname (libcompiler-rt overlaps clang's lib/clang/21/include)
     seen = {}

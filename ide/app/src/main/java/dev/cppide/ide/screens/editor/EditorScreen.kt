@@ -25,6 +25,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import dev.cppide.ide.screens.editor.components.FloatingDebugPanel
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -72,7 +73,6 @@ fun EditorScreen(
     onIntent: (EditorIntent) -> Unit,
     onBack: () -> Unit,
     onRequestCompletion: suspend (liveContent: String, line: Int, column: Int) -> List<LspCompletion>,
-    onRequestHover: suspend (line: Int, column: Int) -> String?,
     onChatOpened: () -> Unit,
     onChatRefresh: () -> Unit,
     onCheckUnread: () -> Unit,
@@ -82,11 +82,17 @@ fun EditorScreen(
     val dimens = CppIde.dimens
 
     var controller by remember { mutableStateOf<EditorController?>(null) }
+    var canUndo by remember { mutableStateOf(false) }
+    var canRedo by remember { mutableStateOf(false) }
 
-    // Load chat messages only when the chat tab transitions to active.
+    // Reload chat messages whenever the chat tab is the active bottom
+    // panel AND the active source file changes. Keying only on
+    // `chatActive` would leave stale messages after a tab-bar or
+    // file-tree switch.
     val chatActive = state.bottomPanelVisible && state.bottomPanelTab == BottomPanelTab.Chat
-    LaunchedEffect(chatActive) {
-        if (chatActive) onChatOpened()
+    val chatActiveForFile = state.openFile?.relativePath?.takeIf { chatActive }
+    LaunchedEffect(chatActiveForFile) {
+        chatActiveForFile?.let { onChatOpened() }
     }
 
     // Poll for new messages every 5s while the chat tab is visible.
@@ -126,6 +132,8 @@ fun EditorScreen(
                 activeFileName = state.openFile?.name,
                 isDirty = state.openFile?.isDirty == true,
                 canShare = state.openFile != null,
+                canUndo = canUndo,
+                canRedo = canRedo,
                 isMarkdown = isMarkdown,
                 markdownPreview = state.markdownPreview,
                 onBack = onBack,
@@ -175,8 +183,8 @@ fun EditorScreen(
                         fileId = openFile.relativePath,
                         initialContent = openFile.savedContent,
                         onContentChange = { onIntent(EditorIntent.EditContent(it)) },
+                        onHistoryChange = { u, r -> canUndo = u; canRedo = r },
                         onRequestCompletion = onRequestCompletion,
-                        onRequestHover = onRequestHover,
                         onToggleBreakpoint = { line ->
                             onIntent(EditorIntent.ToggleBreakpoint(line))
                         },
@@ -189,14 +197,43 @@ fun EditorScreen(
                                 stopped.sourceFile?.substringAfterLast('/')
                                     ?.substringAfterLast('\\') == openBasename
                             }?.sourceLine,
+                        inlineDebugValues = state.inlineDebugValuesForOpenFile,
+                        lspDiagnostics = state.lspDiagnostics,
                         modifier = Modifier.fillMaxSize(),
+                    )
+                }
+                // Floating VSCode-style debug toolbar overlay. Lives
+                // INSIDE the editor box so it tracks the editor's
+                // bounds (not the bottom panel or top app bar). The
+                // panel composable fills the whole editor box so it
+                // can measure those bounds for drag clamping; inside,
+                // it positions the actual toolbar top-center and
+                // applies the user's drag offset. Touches on empty
+                // space pass through to the editor underneath.
+                FloatingDebugPanel(
+                    debuggerState = state.debuggerState,
+                    onIntent = onIntent,
+                    modifier = Modifier.fillMaxSize(),
+                )
+
+                // FAB lives inside the editor Box (not at screen root)
+                // so it rides above the bottom panel when the panel is
+                // open, instead of being hidden behind it.
+                if (!isMarkdown && !state.debuggerState.isActive) {
+                    RunFab(
+                        runState = state.runState,
+                        onRun = { onIntent(EditorIntent.RunOrStop) },
+                        onDebug = { onIntent(EditorIntent.StartDebug) },
+                        onStop = { onIntent(EditorIntent.RunOrStop) },
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(end = dimens.spacingL, bottom = dimens.spacingL),
                     )
                 }
             }
 
             val ext = state.openFile?.name?.substringAfterLast('.', "")?.lowercase()
             val isCodeFile = ext in setOf("cpp", "c", "cc", "cxx", "h", "hpp")
-            val isCppFile = isCodeFile
 
             if (state.bottomPanelVisible) {
                 BottomPanel(
@@ -204,49 +241,51 @@ fun EditorScreen(
                     terminalLines = state.terminalLines,
                     problems = state.allProblems,
                     debuggerState = state.debuggerState,
-                    breakpoints = state.breakpoints,
+                    debugScopes = state.debugScopes,
+                    debugVariables = state.debugVariables,
+                    expandedVariableRefs = state.expandedVariableRefs,
                     chatState = state.chatState,
-                    isCppFile = isCppFile,
+                    isCppFile = isCodeFile,
+                    // Accept terminal input only when the program is
+                    // genuinely executing: plain Run, or debug mid-step
+                    // (Starting/Running). Paused (`Stopped`) means the
+                    // inferior is frozen — any keys the user types
+                    // won't reach stdin until they resume, which is
+                    // confusing, so we disable the input row entirely
+                    // during the pause.
+                    isRunning = state.runState == RunState.Running ||
+                        (state.debuggerState.isActive &&
+                            state.debuggerState !is dev.cppide.core.debug.DebuggerState.Stopped),
+                    // Auto-open the IME whenever the program is truly
+                    // executing. This mirrors `isRunning` exactly —
+                    // during a Debug pause (`Stopped`) the input row
+                    // is disabled, and we also actively dismiss the
+                    // keyboard in TerminalView when `inputEnabled`
+                    // flips false, so a brief Running window during
+                    // step-over can't leave a stale IME open.
+                    autoShowKeyboard = state.runState == RunState.Running ||
+                        (state.debuggerState.isActive &&
+                            state.debuggerState !is dev.cppide.core.debug.DebuggerState.Stopped),
                     onSelectTab = { onIntent(EditorIntent.SwitchBottomTab(it)) },
                     onClose = { onIntent(EditorIntent.ToggleBottomPanel) },
                     onClearTerminal = { onIntent(EditorIntent.ClearTerminal) },
+                    onSendTerminalInput = { onIntent(EditorIntent.SendTerminalInput(it)) },
                     onJumpToProblem = { onIntent(EditorIntent.JumpToDiagnostic(it)) },
-                    onStartDebug = { onIntent(EditorIntent.StartDebug) },
-                    onDebugStep = { onIntent(EditorIntent.DebugStep) },
-                    onDebugContinue = { onIntent(EditorIntent.DebugContinue) },
-                    onDebugPause = { onIntent(EditorIntent.DebugPause) },
-                    onDebugStop = { onIntent(EditorIntent.DebugStop) },
-                    onToggleBreakpoint = { bp ->
-                        onIntent(EditorIntent.RemoveBreakpoint(bp))
+                    onToggleVariableExpansion = { ref ->
+                        onIntent(EditorIntent.ToggleVariableExpansion(ref))
                     },
                     onChatInputChange = { onIntent(EditorIntent.UpdateChatInput(it)) },
                     onChatSend = { onIntent(EditorIntent.SendChatMessage) },
                 )
             } else {
-                // Collapsed panel bar — always visible, lets user open
-                // the panel without needing to hit Run first.
                 CollapsedPanelBar(
                     chatUnreadCount = state.chatState.unreadCount,
-                    isCodeFile = isCppFile,
+                    isCodeFile = isCodeFile,
                     onSelectTab = { tab ->
                         onIntent(EditorIntent.SwitchBottomTab(tab))
                     },
                 )
             }
-        }
-
-        // Run/stop FAB (bottom-right). Hide for non-runnable files.
-        val openPath = state.openFile?.relativePath.orEmpty()
-        val isRunnableFile = !openPath.endsWith(".md", ignoreCase = true)
-        if (isRunnableFile && !state.bottomPanelVisible) {
-            RunFab(
-                runState = state.runState,
-                onClick = { onIntent(EditorIntent.RunOrStop) },
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(end = dimens.spacingL, bottom = dimens.spacingL + 32.dp)
-                    .navigationBarsPadding(),
-            )
         }
 
         // Modal drawer overlay.
@@ -313,7 +352,7 @@ private fun CollapsedPanelBar(
             if (isCodeFile) {
                 CollapsedTab("Terminal") { onSelectTab(BottomPanelTab.Terminal) }
                 CollapsedTab("Problems") { onSelectTab(BottomPanelTab.Problems) }
-                CollapsedTab("Debug") { onSelectTab(BottomPanelTab.Debug) }
+                CollapsedTab("Variables") { onSelectTab(BottomPanelTab.Variables) }
             }
             Row(
                 modifier = Modifier.clickable { onSelectTab(BottomPanelTab.Chat) },

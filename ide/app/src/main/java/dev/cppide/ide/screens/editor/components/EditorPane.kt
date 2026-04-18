@@ -2,61 +2,34 @@ package dev.cppide.ide.screens.editor.components
 
 import android.graphics.Typeface
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.offset
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Icon
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color as ComposeColor
-import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.viewinterop.AndroidView
 import dev.cppide.core.lsp.LspCompletion
+import dev.cppide.core.lsp.LspDiagnostic
+import dev.cppide.ide.editor.TextMateBootstrap
 import dev.cppide.ide.theme.CppIde
 import io.github.rosemoe.sora.event.ClickEvent
 import io.github.rosemoe.sora.event.ContentChangeEvent
 import io.github.rosemoe.sora.event.EditorMotionEvent
-import io.github.rosemoe.sora.event.LongPressEvent
-import io.github.rosemoe.sora.event.ScrollEvent
+import io.github.rosemoe.sora.lang.diagnostic.DiagnosticRegion
+import io.github.rosemoe.sora.lang.diagnostic.DiagnosticsContainer
 import io.github.rosemoe.sora.langs.textmate.TextMateColorScheme
 import io.github.rosemoe.sora.langs.textmate.TextMateLanguage
 import io.github.rosemoe.sora.langs.textmate.registry.GrammarRegistry
 import io.github.rosemoe.sora.langs.textmate.registry.ThemeRegistry
-import io.github.rosemoe.sora.widget.CodeEditor
-import kotlinx.coroutines.launch
+import io.github.rosemoe.sora.widget.schemes.EditorColorScheme
 
 /**
  * Imperative actions the surrounding screen can fire at the sora editor.
@@ -81,19 +54,16 @@ interface EditorController {
  * update → recomposition → setText → another ContentChangeEvent. With
  * sora-editor's TextMate highlighter, that loop allocates ~30 MB per
  * keystroke and OOMs after a few characters.
- *
- * Long-press a symbol to trigger a clangd hover: the result is shown as
- * a floating card anchored at the top of the editor. A top-anchored card
- * is easier to read on a phone than a popup at the touch point (which
- * your finger would otherwise cover).
  */
 @Composable
 fun EditorPane(
     fileId: String,
     initialContent: String,
     onContentChange: (String) -> Unit,
+    /** Called whenever sora's undo/redo availability changes, so the
+     *  top bar can dim the buttons when the stacks are empty. */
+    onHistoryChange: (canUndo: Boolean, canRedo: Boolean) -> Unit,
     onRequestCompletion: suspend (liveContent: String, line: Int, column: Int) -> List<LspCompletion>,
-    onRequestHover: suspend (line: Int, column: Int) -> String?,
     onToggleBreakpoint: (line: Int) -> Unit,
     onControllerReady: (EditorController) -> Unit,
     /** 1-indexed source lines with breakpoints (+ verified flag). The
@@ -103,56 +73,64 @@ fun EditorPane(
      *  stopped inside this file. The editor highlights the line and
      *  scrolls to it. */
     currentLine: Int? = null,
+    /** Disables text input + selection edits while true. The debugger
+     *  locks the source while paused on a breakpoint to match VSCode
+     *  behavior — a stop is for inspecting state, not typing into the
+     *  file the program is frozen inside of. */
+    readOnly: Boolean = false,
+    /** 1-indexed source line → debug values to paint at end-of-line while
+     *  the debugger is stopped. Empty when not stopped or the current
+     *  file isn't the stopped one. */
+    inlineDebugValues: Map<Int, List<dev.cppide.ide.screens.editor.InlineDebugValue>> = emptyMap(),
+    /** clangd diagnostics for the currently open file. Rendered as squiggle
+     *  underlines under the offending text, with Sora's built-in diagnostic
+     *  tooltip window picking them up on cursor hover. */
+    lspDiagnostics: List<LspDiagnostic> = emptyList(),
     modifier: Modifier = Modifier,
     languageScope: String = "source.cpp",
 ) {
     val colors = CppIde.colors
-    val dimens = CppIde.dimens
+    val darkTheme = isSystemInDarkTheme()
     // Capture the latest callbacks so the AndroidView listeners (attached
     // once per editor instance) always call the freshest lambdas.
     val callback = rememberUpdatedState(onContentChange)
     val completionCallback = rememberUpdatedState(onRequestCompletion)
-    val hoverCallback = rememberUpdatedState(onRequestHover)
     val breakpointCallback = rememberUpdatedState(onToggleBreakpoint)
-    val scope = rememberCoroutineScope()
+    val historyCallback = rememberUpdatedState(onHistoryChange)
 
-    // Currently-shown hover text; null when no tooltip is visible.
-    var hoverText by remember(fileId) { mutableStateOf<String?>(null) }
-
-    // Live reference to the CodeEditor so Compose overlays can compute
-    // their Y positions from its scroll state. We take over drawing
-    // entirely for breakpoints + current line — the Styles/LineSideIcon
-    // path is incompatible with our TextMate analyzer, which replaces
-    // the Styles object on every analysis pass.
-    var editorRef by remember(fileId) { mutableStateOf<CodeEditor?>(null) }
-    // Live scroll position + row height, updated from ScrollEvent. Px.
-    var scrollYpx by remember(fileId) { mutableStateOf(0) }
-    var rowHeightPx by remember(fileId) { mutableStateOf(0) }
-    // Tick on every scroll so derived offsets recompose.
-    var scrollTick by remember(fileId) { mutableStateOf(0) }
-
-    // When the debugger stops inside the current file, scroll into view.
-    LaunchedEffect(editorRef, currentLine) {
-        val editor = editorRef ?: return@LaunchedEffect
-        val line = currentLine ?: return@LaunchedEffect
-        try { editor.jumpToLine(line - 1) } catch (_: Throwable) {}
-    }
+    // Live reference to the editor. DebugCodeEditor paints the current
+    // execution line and breakpoint gutter markers inside its own
+    // onDraw — no Compose overlay, no scroll-event tracking, no pixel
+    // math that drifts during programmatic scrolls.
+    var editorRef by remember(fileId) { mutableStateOf<DebugCodeEditor?>(null) }
 
     Box(
         modifier = modifier
             .fillMaxSize()
             .background(colors.editorBackground),
     ) {
-        key(fileId) {
-            AndroidView(
+        key(fileId, darkTheme) {
+            AndroidView<DebugCodeEditor>(
                 modifier = Modifier.fillMaxSize(),
                 factory = { context ->
-                    CodeEditor(context).apply {
+                    DebugCodeEditor(context).apply {
                         // Theme + language. LspCppLanguage wraps TextMateLanguage
                         // so we keep syntax highlighting, bracket/indent logic,
                         // etc., while replacing the identifier-based
                         // autocompleter with real clangd completions.
-                        colorScheme = TextMateColorScheme.create(ThemeRegistry.getInstance())
+                        ThemeRegistry.getInstance().setTheme(
+                            if (darkTheme) TextMateBootstrap.DARK_THEME_NAME
+                            else TextMateBootstrap.LIGHT_THEME_NAME,
+                        )
+                        colorScheme = TextMateColorScheme.create(ThemeRegistry.getInstance()).apply {
+                            // Sora's TextMate bridge leaves cursor + matched-bracket
+                            // colors defaulted, so in Dark+ the cursor lands
+                            // black-on-dark (invisible over `}` etc.). Pin both
+                            // to the Compose token so they track the theme.
+                            val cursorArgb = colors.editorCursor.toArgb()
+                            setColor(EditorColorScheme.SELECTION_INSERT, cursorArgb)
+                            setColor(EditorColorScheme.SELECTION_HANDLE, cursorArgb)
+                        }
                         val textMate = TextMateLanguage.create(
                             languageScope, GrammarRegistry.getInstance(), true
                         )
@@ -171,25 +149,28 @@ fun EditorPane(
                         isHighlightCurrentLine = true
                         tabWidth = 4
                         isWordwrap = false
+                        // Wider gutter so the breakpoint tap target is
+                        // comfortable on a phone. Default is ~3-4 dp on
+                        // each side which makes setting a breakpoint
+                        // feel like trying to tap a hair. We bump both
+                        // the left padding (before the numbers) and the
+                        // divider gap (after the numbers) so the total
+                        // gutter is closer to ~44 dp which matches
+                        // Material's recommended touch target.
+                        val dpUnitPx = dpUnit
+                        setLineNumberMarginLeft(dpUnitPx * 14f)
+                        setDividerMargin(dpUnitPx * 8f, dpUnitPx * 10f)
 
                         // Initial content. Set once; the editor owns it from here.
                         setText(initialContent)
 
-                        // Forward edits to Compose state.
+                        // Forward edits to Compose state, and surface the
+                        // updated undo/redo availability so the top-bar
+                        // buttons can dim the moment the history stacks
+                        // are exhausted (or refreshed on an undo).
                         subscribeAlways(ContentChangeEvent::class.java) { _ ->
                             callback.value(text.toString())
-                        }
-
-                        // Long-press → clangd hover. The event fires on the
-                        // editor thread; we hop onto the Compose scope so the
-                        // suspend call + state update run where they should.
-                        subscribeAlways(LongPressEvent::class.java) { evt ->
-                            val line = evt.line
-                            val column = evt.column
-                            scope.launch {
-                                val result = hoverCallback.value(line, column)
-                                hoverText = result?.takeIf { it.isNotBlank() }
-                            }
+                            historyCallback.value(canUndo(), canRedo())
                         }
 
                         // Tap on the line-number gutter → toggle breakpoint.
@@ -208,155 +189,76 @@ fun EditorPane(
                         // configured. The top bar uses this to drive undo/
                         // redo without the screen knowing sora's API.
                         onControllerReady(object : EditorController {
-                            override fun undo() { this@apply.undo() }
-                            override fun redo() { this@apply.redo() }
+                            override fun undo() {
+                                this@apply.undo()
+                                historyCallback.value(canUndo(), canRedo())
+                            }
+                            override fun redo() {
+                                this@apply.redo()
+                                historyCallback.value(canUndo(), canRedo())
+                            }
                         })
+                        historyCallback.value(canUndo(), canRedo())
                         editorRef = this@apply
-
-                        // Feed scroll events to the overlay so breakpoint
-                        // dots and current-line highlight track the view.
-                        subscribeAlways(ScrollEvent::class.java) { evt ->
-                            scrollYpx = evt.endY
-                            if (rowHeightPx == 0) rowHeightPx = rowHeight
-                            scrollTick++
-                        }
                     }
                 },
-                // No-op update — the editor manages its own content. Switching
-                // files is handled by the surrounding `key(fileId)` block, which
-                // disposes and recreates the editor with the new initialContent.
+                // Apply Compose state changes to the editor view. Both
+                // setters invalidate internally, so the editor repaints
+                // on state change. When the current execution line moves
+                // to a new value, center it in the viewport too.
                 update = { editor ->
-                    // Seed the row height on first layout — ScrollEvent only
-                    // fires when the view actually moves, so without this the
-                    // overlay computes y=0 for every line on initial display.
-                    if (rowHeightPx == 0 && editor.rowHeight > 0) {
-                        rowHeightPx = editor.rowHeight
+                    editor.isEditable = !readOnly
+                    editor.breakpointLines = breakpointLines
+                    editor.inlineDebugValues = inlineDebugValues
+                    val prev = editor.currentExecutionLine
+                    editor.currentExecutionLine = currentLine
+                    if (currentLine != null && currentLine != prev) {
+                        editor.scrollToLineCentered(currentLine)
                     }
+                    applyDiagnostics(editor, lspDiagnostics)
                 },
                 onRelease = { editor -> editor.release() },
-            )
-        }
-
-        // ---- debugger decoration overlay ----
-        // Read scrollTick so Compose recomposes on every scroll event.
-        @Suppress("UNUSED_EXPRESSION") scrollTick
-        val editor = editorRef
-        if (editor != null && rowHeightPx > 0) {
-            val density = LocalDensity.current
-            // Y pixel of (1-indexed) line number relative to the editor's
-            // top-left corner, accounting for current scroll.
-            fun lineTopPx(line: Int): Int = (line - 1) * rowHeightPx - scrollYpx
-
-            // --- current-line amber bar (behind text, spans full width) ---
-            currentLine?.let { line ->
-                val top = lineTopPx(line)
-                if (top + rowHeightPx >= 0) {
-                    Box(
-                        modifier = Modifier
-                            .offset {
-                                IntOffset(x = 0, y = top.coerceAtLeast(-rowHeightPx))
-                            }
-                            .fillMaxWidth()
-                            .height(with(density) { rowHeightPx.toDp() })
-                            .background(ComposeColor(0x553A1FA0)),
-                    )
-                }
-            }
-
-            // --- breakpoint dots in the gutter ---
-            for ((line, verified) in breakpointLines) {
-                val top = lineTopPx(line)
-                // Skip lines scrolled far above the viewport.
-                if (top + rowHeightPx < 0) continue
-                val dotColor = if (verified)
-                    ComposeColor(0xFFF14C4C)
-                else
-                    ComposeColor(0xFF848484)
-                Box(
-                    modifier = Modifier
-                        .offset {
-                            IntOffset(
-                                x = with(density) { 4.dp.roundToPx() },
-                                y = top + (rowHeightPx - with(density) { 10.dp.roundToPx() }) / 2,
-                            )
-                        }
-                        .size(10.dp)
-                        .background(dotColor, CircleShape),
-                )
-            }
-        }
-
-        // ---- hover tooltip overlay ----
-        hoverText?.let { text ->
-            HoverCard(
-                text = text,
-                onDismiss = { hoverText = null },
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .padding(dimens.spacingS),
             )
         }
     }
 }
 
 /**
- * Floating tooltip for clangd hover results. Top-anchored, dark surface,
- * monospace text, scrollable for long signatures, with an explicit close
- * button — on mobile an X is more discoverable than "tap outside".
+ * Converts clangd's [LspDiagnostic] list into a Sora [DiagnosticsContainer]
+ * and attaches it to the editor so squiggles render inline and
+ * [io.github.rosemoe.sora.widget.component.EditorDiagnosticsTooltipWindow]
+ * can show the message when the cursor enters a region.
  *
- * Clangd returns markdown in many cases; we render as plain text for v1
- * since the signature and type info is already readable without bold/
- * italic formatting.
+ * Out-of-range line/column values (stale diagnostics for a newer buffer)
+ * are skipped silently — clangd re-emits on every didChange, so the next
+ * pass overwrites this one anyway.
  */
-@Composable
-private fun HoverCard(
-    text: String,
-    onDismiss: () -> Unit,
-    modifier: Modifier = Modifier,
+private fun applyDiagnostics(
+    editor: DebugCodeEditor,
+    diagnostics: List<LspDiagnostic>,
 ) {
-    val colors = CppIde.colors
-    val dimens = CppIde.dimens
-    Surface(
-        modifier = modifier.widthIn(max = 360.dp),
-        color = colors.surfaceElevated,
-        contentColor = colors.textPrimary,
-        shape = RoundedCornerShape(dimens.radiusM),
-        shadowElevation = 8.dp,
-    ) {
-        Column(
-            modifier = Modifier
-                .padding(
-                    start = dimens.spacingM,
-                    end = dimens.spacingS,
-                    top = dimens.spacingS,
-                    bottom = dimens.spacingM,
-                ),
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End,
-            ) {
-                Icon(
-                    imageVector = Icons.Filled.Close,
-                    contentDescription = "Close hover",
-                    tint = colors.textSecondary,
-                    modifier = Modifier
-                        .clickable(onClick = onDismiss)
-                        .padding(dimens.spacingXs),
-                )
+    val container = DiagnosticsContainer()
+    if (diagnostics.isNotEmpty()) {
+        val content = editor.text
+        val totalLines = content.lineCount
+        for (d in diagnostics) {
+            if (d.line < 0 || d.line >= totalLines) continue
+            val endLineClamped = d.endLine.coerceIn(d.line, totalLines - 1)
+            val startCol = d.column.coerceAtLeast(0)
+                .coerceAtMost(content.getColumnCount(d.line))
+            val endColClamped = d.endColumn.coerceAtLeast(0)
+                .coerceAtMost(content.getColumnCount(endLineClamped))
+            val start = runCatching { content.getCharIndex(d.line, startCol) }.getOrNull() ?: continue
+            var end = runCatching { content.getCharIndex(endLineClamped, endColClamped) }.getOrNull() ?: continue
+            if (end <= start) end = start + 1
+            val severity = when (d.severity) {
+                LspDiagnostic.Severity.ERROR -> DiagnosticRegion.SEVERITY_ERROR
+                LspDiagnostic.Severity.WARNING -> DiagnosticRegion.SEVERITY_WARNING
+                LspDiagnostic.Severity.INFORMATION -> DiagnosticRegion.SEVERITY_TYPO
+                LspDiagnostic.Severity.HINT -> DiagnosticRegion.SEVERITY_TYPO
             }
-            Box(
-                modifier = Modifier
-                    .heightIn(max = 220.dp)
-                    .verticalScroll(rememberScrollState()),
-            ) {
-                Text(
-                    text = text,
-                    color = colors.textPrimary,
-                    fontSize = 12.sp,
-                    fontFamily = FontFamily.Monospace,
-                )
-            }
+            container.addDiagnostic(DiagnosticRegion(start, end, severity))
         }
     }
+    editor.diagnostics = container
 }

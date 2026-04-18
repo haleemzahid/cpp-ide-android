@@ -23,3 +23,4 @@ dependencyResolutionManagement {
 rootProject.name = "cppide"
 include(":core")
 include(":app")
+include(":toolchain-pack")

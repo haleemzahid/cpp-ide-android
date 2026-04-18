@@ -7,8 +7,7 @@ import dev.cppide.core.chat.ChatApiClient
 import dev.cppide.core.common.DefaultDispatchers
 import dev.cppide.core.common.DispatcherProvider
 import dev.cppide.core.debug.DebuggerService
-import dev.cppide.core.debug.DebuggerSpike
-import dev.cppide.core.debug.LldbDebuggerService
+import dev.cppide.core.debug.LldbDapDebuggerService
 import dev.cppide.core.exercises.ExercisesApiClient
 import dev.cppide.core.lsp.ClangdLspService
 import dev.cppide.core.lsp.LspService
@@ -46,7 +45,6 @@ class Core private constructor(
     val projectService: ProjectService,
     val sessionRepository: SessionRepository,
     val lspService: LspService,
-    val debuggerSpike: DebuggerSpike,
     val debuggerService: DebuggerService,
     val exercisesApi: ExercisesApiClient,
     val studentAuth: StudentAuthClient,
@@ -57,16 +55,24 @@ class Core private constructor(
     /**
      * Copies the bundled runtime shim source (runtime_shim.cpp) from assets
      * into app-private storage so [BuildService] can pass it to clang++
-     * when `BuildConfig.wrapMain = true`. Idempotent — the second call is
-     * a no-op if the file is already present and the assets haven't changed.
+     * when `BuildConfig.wrapMain = true`.
+     *
+     * Always compares the on-disk bytes against the APK asset and rewrites
+     * if they differ. The previous implementation only wrote when the file
+     * was missing — which meant an app upgrade that changed the shim (e.g.
+     * the 4→5 arg `run_user_main` signature when stdin support landed) was
+     * silently using the stale cached copy and producing user .so's with
+     * the wrong ABI.
      */
     fun runtimeShimSource(): File {
         val dst = File(context.filesDir, "runtime/runtime_shim.cpp")
-        if (!dst.exists() || dst.length() == 0L) {
+        val assetBytes = context.assets.open(RUNTIME_SHIM_ASSET).use { it.readBytes() }
+        val needsWrite = !dst.exists() ||
+            dst.length() != assetBytes.size.toLong() ||
+            !dst.readBytes().contentEquals(assetBytes)
+        if (needsWrite) {
             dst.parentFile?.mkdirs()
-            context.assets.open(RUNTIME_SHIM_ASSET).use { input ->
-                dst.outputStream().use { output -> input.copyTo(output) }
-            }
+            dst.writeBytes(assetBytes)
         }
         return dst
     }
@@ -100,8 +106,11 @@ class Core private constructor(
                 projectService = DefaultProjectService(dispatchers),
                 sessionRepository = RoomSessionRepository(app, dispatchers),
                 lspService = ClangdLspService(toolchain, dispatchers),
-                debuggerSpike = DebuggerSpike(toolchain, dispatchers),
-                debuggerService = LldbDebuggerService(toolchain, dispatchers),
+                debuggerService = LldbDapDebuggerService(
+                    toolchain = toolchain,
+                    workingDir = app.filesDir,
+                    dispatchers = dispatchers,
+                ),
                 exercisesApi = ExercisesApiClient(dispatchers),
                 studentAuth = studentAuth,
                 chatApi = ChatApiClient(dispatchers, studentAuth),

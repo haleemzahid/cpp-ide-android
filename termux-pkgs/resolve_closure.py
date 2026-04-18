@@ -243,11 +243,13 @@ def resolve_closure(initial_pkgs):
 
 
 def main():
-    # Compiler/linker closure only. `lldb-server` is staged separately in
-    # stage_toolchain.py — running it through this resolver drags in
-    # liblldb.so's full python/openssl/ncurses closure (200+ MB of stuff
-    # lldb-server itself doesn't touch). We just want lldb-server's direct
-    # DT_NEEDED (liblzma.so.5 is the only non-system lib it adds).
+    # Compiler/linker/debugger closure. `lldb` is included because we ship
+    # `lldb-dap` for VSCode-quality debugging (call stack, variables, proper
+    # step over/into/out). lldb-dap requires liblldb.so which pulls in its
+    # full transitive closure: libpython3.13 (+stdlib), ncurses, libedit,
+    # libxml2, openssl, libffi, etc. This is a deliberate tradeoff — the APK
+    # grows by tens of MB, but we get real debugging instead of reimplementing
+    # lldb in Kotlin.
     initial = [
         "clang",           # driver + libclang-cpp.so
         "libllvm",         # libLLVM.so
@@ -255,6 +257,7 @@ def main():
         "lld",             # linker
         "libcompiler-rt",  # compiler runtime (libclang_rt.*.a)
         "ndk-sysroot",     # android headers + libs (crt*.o, libc.a, etc.)
+        "lldb",            # lldb-dap + liblldb.so (DAP debug adapter)
     ]
     print(f"Resolving closure from: {initial}")
     resolved, pkgs, missing = resolve_closure(initial)

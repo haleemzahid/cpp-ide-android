@@ -62,9 +62,9 @@ fun BottomPanelTabs(
             )
             Spacer(Modifier.width(dimens.spacingS))
             TabButton(
-                label = "Debug",
-                active = activeTab == BottomPanelTab.Debug,
-                onClick = { onSelectTab(BottomPanelTab.Debug) },
+                label = "Variables",
+                active = activeTab == BottomPanelTab.Variables,
+                onClick = { onSelectTab(BottomPanelTab.Variables) },
             )
             Spacer(Modifier.width(dimens.spacingS))
         }

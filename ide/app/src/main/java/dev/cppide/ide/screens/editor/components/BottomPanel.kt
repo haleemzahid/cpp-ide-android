@@ -12,9 +12,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import dev.cppide.core.build.Diagnostic
-import dev.cppide.core.debug.BreakpointState
 import dev.cppide.core.debug.DebuggerState
-import dev.cppide.core.debug.SourceBreakpoint
+import dev.cppide.core.debug.Scope
+import dev.cppide.core.debug.Variable
 import dev.cppide.ide.components.CppHorizontalDivider
 import dev.cppide.ide.screens.editor.BottomPanelTab
 import dev.cppide.ide.screens.editor.ChatPanelState
@@ -27,19 +27,24 @@ fun BottomPanel(
     terminalLines: List<TerminalLine>,
     problems: List<Diagnostic>,
     debuggerState: DebuggerState,
-    breakpoints: Map<SourceBreakpoint, BreakpointState>,
+    debugScopes: List<Scope>,
+    debugVariables: Map<Int, List<Variable>>,
+    expandedVariableRefs: Set<Int>,
     chatState: ChatPanelState,
     isCppFile: Boolean,
+    /** True while a program is running — enables the stdin input row. */
+    isRunning: Boolean,
+    /** True when the terminal may auto-pop the IME on a partial prompt.
+     *  False while the debugger is paused: the prompt on screen is
+     *  carry-over from an already-executed cout, not a live stdin block. */
+    autoShowKeyboard: Boolean,
     onSelectTab: (BottomPanelTab) -> Unit,
     onClose: () -> Unit,
     onClearTerminal: () -> Unit,
+    /** Called when the user types a line + Enter in the terminal input. */
+    onSendTerminalInput: (String) -> Unit,
     onJumpToProblem: (Diagnostic) -> Unit,
-    onStartDebug: () -> Unit,
-    onDebugStep: () -> Unit,
-    onDebugContinue: () -> Unit,
-    onDebugPause: () -> Unit,
-    onDebugStop: () -> Unit,
-    onToggleBreakpoint: (SourceBreakpoint) -> Unit,
+    onToggleVariableExpansion: (Int) -> Unit,
     onChatInputChange: (String) -> Unit,
     onChatSend: () -> Unit,
     modifier: Modifier = Modifier,
@@ -67,26 +72,29 @@ fun BottomPanel(
         CppHorizontalDivider()
         Box(modifier = Modifier.fillMaxWidth().height(contentHeight)) {
             when (activeTab) {
-                BottomPanelTab.Terminal -> TerminalView(lines = terminalLines)
+                BottomPanelTab.Terminal -> TerminalView(
+                    lines = terminalLines,
+                    inputEnabled = isRunning,
+                    autoShowKeyboard = autoShowKeyboard,
+                    onSendInput = onSendTerminalInput,
+                )
                 BottomPanelTab.Problems -> ProblemsList(
                     problems = problems,
                     onJumpTo = onJumpToProblem,
                 )
-                BottomPanelTab.Debug -> DebugPanel(
+                BottomPanelTab.Variables -> VariablesPanel(
                     debuggerState = debuggerState,
-                    breakpoints = breakpoints,
-                    onStart = onStartDebug,
-                    onStep = onDebugStep,
-                    onContinue = onDebugContinue,
-                    onPause = onDebugPause,
-                    onStop = onDebugStop,
-                    onToggleBreakpoint = onToggleBreakpoint,
+                    scopes = debugScopes,
+                    variables = debugVariables,
+                    expanded = expandedVariableRefs,
+                    onToggleExpand = onToggleVariableExpansion,
                 )
                 BottomPanelTab.Chat -> ChatPanel(
                     messages = chatState.messages,
                     inputText = chatState.input,
                     isSending = chatState.isSending,
                     isLoading = chatState.isLoading,
+                    sendError = chatState.sendError,
                     isCppFile = isCppFile,
                     onInputChange = onChatInputChange,
                     onSend = onChatSend,

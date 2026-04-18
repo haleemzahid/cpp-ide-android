@@ -63,7 +63,6 @@ fun EditorRoute(
         onIntent = viewModel::handle,
         onBack = onBack,
         onRequestCompletion = viewModel::requestCompletion,
-        onRequestHover = viewModel::requestHover,
         onChatOpened = viewModel::loadChatForCurrentFile,
         onChatRefresh = viewModel::refreshChat,
         onCheckUnread = viewModel::checkUnread,

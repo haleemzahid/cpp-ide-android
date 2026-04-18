@@ -32,16 +32,28 @@ object TextMateBootstrap {
 
         GrammarRegistry.getInstance().loadGrammars(LANGUAGES_INDEX)
 
-        val themeStream = FileProviderRegistry.getInstance()
-            .tryGetInputStream(THEME_PATH)
-            ?: error("TextMate theme not found at $THEME_PATH")
+        loadTheme(DARK_THEME_PATH, isDark = true)
+        loadTheme(LIGHT_THEME_PATH, isDark = false)
 
-        val themeSource = IThemeSource.fromInputStream(themeStream, THEME_PATH, null)
-        val themeModel = ThemeModel(themeSource).apply { isDark = true }
-        ThemeRegistry.getInstance().loadTheme(themeModel)
-        ThemeRegistry.getInstance().setTheme("Dark+")
+        // Default to dark; EditorPane flips this live based on the system
+        // theme via [ThemeRegistry.setTheme].
+        ThemeRegistry.getInstance().setTheme(DARK_THEME_NAME)
+    }
+
+    /** Name of the theme as it was registered — use with [ThemeRegistry.setTheme]. */
+    const val DARK_THEME_NAME = "Dark+"
+    const val LIGHT_THEME_NAME = "Light+"
+
+    private fun loadTheme(path: String, isDark: Boolean) {
+        val stream = FileProviderRegistry.getInstance()
+            .tryGetInputStream(path)
+            ?: error("TextMate theme not found at $path")
+        val source = IThemeSource.fromInputStream(stream, path, null)
+        val model = ThemeModel(source).apply { this.isDark = isDark }
+        ThemeRegistry.getInstance().loadTheme(model)
     }
 
     private const val LANGUAGES_INDEX = "textmate/languages.json"
-    private const val THEME_PATH = "textmate/themes/dark_plus_merged.json"
+    private const val DARK_THEME_PATH = "textmate/themes/dark_plus_merged.json"
+    private const val LIGHT_THEME_PATH = "textmate/themes/light_plus.json"
 }

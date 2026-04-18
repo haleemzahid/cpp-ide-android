@@ -56,6 +56,7 @@ fun ChatPanel(
     inputText: String,
     isSending: Boolean,
     isLoading: Boolean,
+    sendError: String? = null,
     isCppFile: Boolean,
     onInputChange: (String) -> Unit,
     onSend: () -> Unit,
@@ -141,6 +142,25 @@ fun ChatPanel(
                 CaptionText(
                     text = "Your code & exercise prompt will be attached",
                     color = colors.textDisabled,
+                )
+            }
+        }
+
+        // Inline send-error banner. Friendly network-aware message
+        // produced by the VM (no internet / timeout / auth required /
+        // server error). Shows right above the input so the user can
+        // retry without leaving the chat panel.
+        if (sendError != null) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(colors.diagnosticError.copy(alpha = 0.12f))
+                    .padding(horizontal = dimens.spacingL, vertical = dimens.spacingS),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                CaptionText(
+                    text = sendError,
+                    color = colors.diagnosticError,
                 )
             }
         }

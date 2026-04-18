@@ -28,10 +28,15 @@ object NativeBridge {
 
     /**
      * dlopen [libPath], dlsym `run_user_main`, invoke it with pipe fds
-     * mapped onto stdout / stderr, return the exit code.
+     * mapped onto stdin / stdout / stderr, return the exit code.
      *
-     * The caller must close the write-ends of the pipes after this
-     * returns so the reader coroutine sees EOF.
+     * Pass `-1` for [stdinFd] to leave the inferior's stdin unchanged
+     * (it then inherits the app's — which effectively means no input;
+     * `cin` returns EOF immediately). Otherwise pass the read-end of
+     * a pipe whose write-end is driven from the UI.
+     *
+     * The caller must close the write-ends of all three pipes after
+     * this returns so the reader/writer coroutines see EOF.
      *
      * Error codes:
      *   -1001  dlopen failed
@@ -39,7 +44,7 @@ object NativeBridge {
      *   -9999  unexpected exception crossing the JNI boundary
      */
     @JvmStatic
-    external fun runUserProgram(libPath: String, stdoutFd: Int, stderrFd: Int): Int
+    external fun runUserProgram(libPath: String, stdinFd: Int, stdoutFd: Int, stderrFd: Int): Int
 
     /**
      * Diagnostic: does [libPath] export [symbol] once dlopen'd? Useful for

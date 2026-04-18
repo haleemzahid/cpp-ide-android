@@ -34,6 +34,11 @@ import org.eclipse.lsp4j.MessageActionItem
 import org.eclipse.lsp4j.MessageParams
 import org.eclipse.lsp4j.Position
 import org.eclipse.lsp4j.PublishDiagnosticsParams
+import org.eclipse.lsp4j.SemanticTokenTypes
+import org.eclipse.lsp4j.SemanticTokensCapabilities
+import org.eclipse.lsp4j.SemanticTokensClientCapabilitiesRequests
+import org.eclipse.lsp4j.SemanticTokensClientCapabilitiesRequestsFull
+import org.eclipse.lsp4j.SemanticTokensParams
 import org.eclipse.lsp4j.ShowMessageRequestParams
 import org.eclipse.lsp4j.TextDocumentContentChangeEvent
 import org.eclipse.lsp4j.TextDocumentIdentifier
@@ -74,6 +79,14 @@ class ClangdLspService(
     private var process: Process? = null
     private var server: LanguageServer? = null
     private var currentRoot: File? = null
+
+    /**
+     * Token-type legend returned by clangd in its `initialize` response.
+     * Index in this list is what the server puts in the delta-encoded
+     * `data` stream; we keep it to map those indices back to names
+     * ("variable", "parameter", etc.) when decoding tokens.
+     */
+    private var tokenTypeLegend: List<String> = emptyList()
 
     override suspend fun start(project: Project): Result<Unit> = withContext(dispatchers.io) {
         runCatching {
@@ -163,11 +176,30 @@ class ClangdLspService(
                         }
                         publishDiagnostics = org.eclipse.lsp4j.PublishDiagnosticsCapabilities()
                         hover = org.eclipse.lsp4j.HoverCapabilities()
+                        // clangd 17+ implements `textDocument/semanticTokens/full`
+                        // but not the /range variant — so we advertise
+                        // full here and never ask for a range. The full
+                        // request is fast enough for single-file student
+                        // programs that we re-fetch on every debugger
+                        // stop rather than adding a version cache.
+                        semanticTokens = SemanticTokensCapabilities(
+                            SemanticTokensClientCapabilitiesRequests(
+                                /* full  */ SemanticTokensClientCapabilitiesRequestsFull(false),
+                                /* range */ false,
+                            ),
+                            STANDARD_TOKEN_TYPES,
+                            emptyList(),
+                            listOf("relative"),
+                        )
                     }
                 }
             }
             val initResult = s.initialize(init).await()
             Log.i(TAG, "LSP initialize OK, server caps=${initResult.capabilities}")
+            tokenTypeLegend = initResult.capabilities
+                ?.semanticTokensProvider?.legend?.tokenTypes
+                ?: emptyList()
+            Log.i(TAG, "semanticTokens legend: $tokenTypeLegend")
             s.initialized(InitializedParams())
             Log.i(TAG, "LSP initialized notification sent — Ready")
 
@@ -317,6 +349,43 @@ class ClangdLspService(
             }
         }
 
+    override suspend fun semanticTokensRange(
+        file: File,
+        startLine: Int,
+        endLine: Int,
+    ): List<LspToken> = withContext(dispatchers.io) {
+        val s = server ?: return@withContext emptyList()
+        if (tokenTypeLegend.isEmpty()) {
+            // Clangd didn't advertise semantic tokens — nothing we can
+            // decode. Happens if capabilities negotiation failed or if
+            // the server build was compiled without the feature.
+            return@withContext emptyList()
+        }
+        // clangd only implements `semanticTokens/full`. We ignore the
+        // requested [startLine, endLine] window and ask for the whole
+        // file, then let the caller filter. The full response for a
+        // typical student program is a few kilobytes, well under the
+        // cost of the DAP round-trip that surrounds this call.
+        val params = SemanticTokensParams(TextDocumentIdentifier(file.toURI().toString()))
+        try {
+            val tokens = s.textDocumentService.semanticTokensFull(params).await()
+                ?: return@withContext emptyList()
+            val all = decodeSemanticTokens(tokens.data ?: emptyList(), tokenTypeLegend)
+            if (startLine <= 0 && endLine >= Int.MAX_VALUE / 2) all
+            else all.filter { it.line in startLine..endLine }
+        } catch (t: Throwable) {
+            val root = generateSequence<Throwable>(t) { it.cause }.lastOrNull()
+            Log.w(
+                TAG,
+                "semanticTokensFull(${file.name}) failed: " +
+                    "${t.javaClass.simpleName}(${t.message}) / " +
+                    "root=${root?.javaClass?.simpleName}(${root?.message})",
+                t,
+            )
+            emptyList()
+        }
+    }
+
     // ---- LanguageClient: receives notifications from clangd ----
 
     private inner class ClangdLanguageClient : LanguageClient {
@@ -409,5 +478,56 @@ class ClangdLspService(
 
     companion object {
         private const val TAG = "cppide-lsp"
+
+        /** LSP-standard token-type names advertised in our client caps. */
+        private val STANDARD_TOKEN_TYPES = listOf(
+            SemanticTokenTypes.Namespace, SemanticTokenTypes.Type,
+            SemanticTokenTypes.Class, SemanticTokenTypes.Enum,
+            SemanticTokenTypes.Interface, SemanticTokenTypes.Struct,
+            SemanticTokenTypes.TypeParameter, SemanticTokenTypes.Parameter,
+            SemanticTokenTypes.Variable, SemanticTokenTypes.Property,
+            SemanticTokenTypes.EnumMember, SemanticTokenTypes.Event,
+            SemanticTokenTypes.Function, SemanticTokenTypes.Method,
+            SemanticTokenTypes.Macro, SemanticTokenTypes.Keyword,
+            SemanticTokenTypes.Modifier, SemanticTokenTypes.Comment,
+            SemanticTokenTypes.String, SemanticTokenTypes.Number,
+            SemanticTokenTypes.Regexp, SemanticTokenTypes.Operator,
+            SemanticTokenTypes.Decorator,
+        )
+
+        /**
+         * Decode LSP's delta-encoded semantic-token wire format into
+         * absolute `(line, startChar, length, typeName)` tuples.
+         *
+         * The wire format is a flat int list packed in groups of 5:
+         *   [deltaLine, deltaStartChar, length, tokenType, modifiers]
+         * where `deltaLine` is relative to the previous token's line,
+         * and `deltaStartChar` is relative to the previous token's
+         * start column *if* on the same line, else from column 0.
+         */
+        internal fun decodeSemanticTokens(
+            data: List<Int>,
+            legend: List<String>,
+        ): List<LspToken> {
+            if (data.size < 5) return emptyList()
+            val result = ArrayList<LspToken>(data.size / 5)
+            var line = 0
+            var startChar = 0
+            var i = 0
+            while (i + 4 < data.size) {
+                val deltaLine = data[i]
+                val deltaStart = data[i + 1]
+                val length = data[i + 2]
+                val typeIdx = data[i + 3]
+                // modifiers = data[i + 4] — ignored; the inline-value
+                // feature only cares about token *type*.
+                line += deltaLine
+                startChar = if (deltaLine == 0) startChar + deltaStart else deltaStart
+                val typeName = legend.getOrNull(typeIdx) ?: "unknown"
+                result += LspToken(line, startChar, length, typeName)
+                i += 5
+            }
+            return result
+        }
     }
 }

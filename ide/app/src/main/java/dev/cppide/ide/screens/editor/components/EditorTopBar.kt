@@ -28,6 +28,8 @@ fun EditorTopBar(
     activeFileName: String?,
     isDirty: Boolean,
     canShare: Boolean,
+    canUndo: Boolean,
+    canRedo: Boolean,
     isMarkdown: Boolean,
     markdownPreview: Boolean,
     onBack: () -> Unit,
@@ -77,20 +79,23 @@ fun EditorTopBar(
                     )
                 }
                 if (!inPreview) {
-                    // Undo / redo aren't dirty-tracked — sora-editor
-                    // owns its own history, and there's no cheap
-                    // reactive signal for "can undo?". Rendered
-                    // always-enabled in source view; a tap with
-                    // nothing to undo is a harmless no-op in sora.
+                    // Undo/redo reflect sora-editor's own history —
+                    // [canUndo]/[canRedo] are refreshed by EditorPane
+                    // after every ContentChangeEvent so the buttons
+                    // dim the moment the user exhausts the stack.
                     CppIconButton(
                         icon = Icons.AutoMirrored.Outlined.Undo,
                         contentDescription = "Undo",
                         onClick = onUndo,
+                        enabled = canUndo,
+                        tint = if (canUndo) CppIde.colors.textPrimary else CppIde.colors.textDisabled,
                     )
                     CppIconButton(
                         icon = Icons.AutoMirrored.Outlined.Redo,
                         contentDescription = "Redo",
                         onClick = onRedo,
+                        enabled = canRedo,
+                        tint = if (canRedo) CppIde.colors.textPrimary else CppIde.colors.textDisabled,
                     )
                 }
                 CppIconButton(

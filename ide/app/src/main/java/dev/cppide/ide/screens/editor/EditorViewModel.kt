@@ -9,6 +9,7 @@ import dev.cppide.core.build.BuildResult
 import dev.cppide.core.build.Diagnostic
 import dev.cppide.core.debug.DebuggerState
 import dev.cppide.core.lsp.LspCompletion
+import org.eclipse.lsp4j.SemanticTokenTypes
 import dev.cppide.core.project.Project
 import dev.cppide.core.run.RunConfig
 import dev.cppide.core.run.RunEvent
@@ -18,6 +19,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
@@ -60,6 +64,18 @@ class EditorViewModel(
     /** Active debug-start task. Separate from runJob so a debug launch can
      *  coexist with a non-debug run cleanup. */
     private var debugJob: Job? = null
+
+    /**
+     * Stdin channel for the currently running inferior. UI typing lands
+     * here; [DefaultRunService] collects from it and pipes bytes to the
+     * child's stdin. `extraBufferCapacity` is modest because the user
+     * can't type fast enough to overflow a 64-entry buffer; `replay=0`
+     * because early chunks shouldn't be delivered to the NEXT run.
+     */
+    private val terminalStdin = MutableSharedFlow<String>(
+        replay = 0,
+        extraBufferCapacity = 64,
+    )
 
     /** Debounced auto-save job. Reset on every keystroke. */
     private var autoSaveJob: Job? = null
@@ -125,16 +141,33 @@ class EditorViewModel(
             core.debuggerService.state.collect { dbg ->
                 _state.update { it.copy(debuggerState = dbg) }
                 when (dbg) {
-                    is DebuggerState.Stopped ->
-                        appendInfo("⏸ stopped  pc=0x${dbg.pc.toString(16)}  reason=${dbg.reason}  sig=${dbg.signal}")
-                    is DebuggerState.Running ->
-                        Unit /* no noise on resume */
-                    is DebuggerState.Exited ->
+                    is DebuggerState.Stopped -> {
+                        val file = dbg.sourceFile
+                        if (file != null && dbg.sourceLine != null) {
+                            autoOpenStoppedFile(file)
+                        }
+                        refreshVariablesForTopFrame(dbg)
+                        refreshInlineDebugValues(dbg)
+                    }
+                    is DebuggerState.Running -> {
+                        _state.update {
+                            it.copy(
+                                debugScopes = emptyList(),
+                                debugVariables = emptyMap(),
+                                expandedVariableRefs = emptySet(),
+                                inlineDebugValues = emptyMap(),
+                            )
+                        }
+                    }
+                    is DebuggerState.Exited -> {
                         appendInfo("■ debug session exited (code=${dbg.code}${if (dbg.signaled) ", signaled" else ""})")
-                    is DebuggerState.Failed ->
+                        _state.update { it.copy(inlineDebugValues = emptyMap()) }
+                    }
+                    is DebuggerState.Failed -> {
                         appendError("debug failed: ${dbg.message}")
-                    is DebuggerState.Starting ->
-                        appendInfo("  debugger: ${dbg.stage}")
+                        _state.update { it.copy(inlineDebugValues = emptyMap()) }
+                    }
+                    is DebuggerState.Starting,
                     DebuggerState.Idle -> Unit
                 }
             }
@@ -204,12 +237,22 @@ class EditorViewModel(
             }
             is EditorIntent.JumpToDiagnostic -> jumpTo(intent.diagnostic)
             EditorIntent.ClearTerminal -> _state.update { it.copy(terminalLines = emptyList()) }
+            is EditorIntent.SendTerminalInput -> sendTerminalInput(intent.text)
 
             // ---- debug ----
             EditorIntent.StartDebug -> startDebug()
-            EditorIntent.DebugStep -> viewModelScope.launch {
-                runCatching { core.debuggerService.stepInstruction() }
-                    .onFailure { t -> if (!t.isShutdownRace()) appendError("step failed: ${t.message}") }
+            EditorIntent.DebugStep,
+            EditorIntent.DebugStepOver -> viewModelScope.launch {
+                runCatching { core.debuggerService.stepOver() }
+                    .onFailure { t -> if (!t.isShutdownRace()) appendError("step over failed: ${t.message}") }
+            }
+            EditorIntent.DebugStepInto -> viewModelScope.launch {
+                runCatching { core.debuggerService.stepInto() }
+                    .onFailure { t -> if (!t.isShutdownRace()) appendError("step into failed: ${t.message}") }
+            }
+            EditorIntent.DebugStepOut -> viewModelScope.launch {
+                runCatching { core.debuggerService.stepOut() }
+                    .onFailure { t -> if (!t.isShutdownRace()) appendError("step out failed: ${t.message}") }
             }
             EditorIntent.DebugContinue -> viewModelScope.launch {
                 runCatching { core.debuggerService.cont() }
@@ -223,24 +266,48 @@ class EditorViewModel(
                 runCatching { core.debuggerService.stop() }
             }
             is EditorIntent.ToggleBreakpoint -> {
-                val file = _state.value.openFile?.relativePath ?: return@handle
+                val relPath = _state.value.openFile?.relativePath ?: return@handle
+                val absPath = core.projectService.resolve(relPath).absolutePath
                 viewModelScope.launch {
                     runCatching {
-                        core.debuggerService.toggleBreakpoint(file, intent.line)
+                        core.debuggerService.toggleBreakpoint(absPath, intent.line)
                     }.onFailure { t -> appendError("toggle bp: ${t.message}") }
                 }
             }
             is EditorIntent.RemoveBreakpoint -> viewModelScope.launch {
                 runCatching {
                     core.debuggerService.toggleBreakpoint(
-                        intent.breakpoint.fileBasename,
+                        intent.breakpoint.filePath,
                         intent.breakpoint.line,
                     )
                 }.onFailure { t -> appendError("remove bp: ${t.message}") }
             }
+            is EditorIntent.ToggleVariableExpansion -> {
+                val ref = intent.variablesReference
+                if (ref <= 0) return@handle
+                val s = _state.value
+                if (ref in s.expandedVariableRefs) {
+                    // Collapse — just drop from the set; cached
+                    // children stay so re-expanding is instant.
+                    _state.update { it.copy(expandedVariableRefs = it.expandedVariableRefs - ref) }
+                } else {
+                    // Expand — fetch children if we don't have them
+                    // yet, then mark expanded.
+                    viewModelScope.launch {
+                        if (_state.value.debugVariables[ref] == null) {
+                            core.debuggerService.fetchVariables(ref).onSuccess { vars ->
+                                _state.update { it.copy(debugVariables = it.debugVariables + (ref to vars)) }
+                            }
+                        }
+                        _state.update { it.copy(expandedVariableRefs = it.expandedVariableRefs + ref) }
+                    }
+                }
+            }
 
             // ---- chat ----
-            is EditorIntent.UpdateChatInput -> _state.update { it.copy(chatState = it.chatState.copy(input = intent.text)) }
+            is EditorIntent.UpdateChatInput -> _state.update {
+                it.copy(chatState = it.chatState.copy(input = intent.text, sendError = null))
+            }
             EditorIntent.SendChatMessage -> sendChatMessage()
 
             // ---- misc ----
@@ -317,7 +384,23 @@ class EditorViewModel(
         val filePath = buildChatFilePath() ?: return
         val (categorySlug, exerciseSlug) = parseSlugs() ?: return
 
-        _state.update { it.copy(chatState = it.chatState.copy(isSending = true)) }
+        // Chat requires an account. Surface the login requirement in
+        // the chat panel itself instead of firing a broken HTTP request.
+        if (!core.studentAuth.isLoggedIn) {
+            _state.update {
+                it.copy(
+                    chatState = it.chatState.copy(
+                        isSending = false,
+                        sendError = "Please log in to send chat messages.",
+                    ),
+                )
+            }
+            return
+        }
+
+        _state.update {
+            it.copy(chatState = it.chatState.copy(isSending = true, sendError = null))
+        }
         viewModelScope.launch {
             val mdPath = openFile.relativePath
                 .substringBeforeLast("/") + "/README.md"
@@ -336,13 +419,16 @@ class EditorViewModel(
                         messages = it.chatState.messages + msg,
                         input = "",
                         isSending = false,
+                        sendError = null,
                     ))
                 }
             }.onFailure { t ->
                 _state.update {
                     it.copy(
-                        chatState = it.chatState.copy(isSending = false),
-                        errorMessage = "Send failed: ${t.message}",
+                        chatState = it.chatState.copy(
+                            isSending = false,
+                            sendError = dev.cppide.ide.util.friendlyNetworkError(t, "Send failed"),
+                        ),
                     )
                 }
             }
@@ -378,7 +464,206 @@ class EditorViewModel(
      * screen can show a thin progress bar (large files on slow storage
      * take a visible fraction of a second).
      */
-    private fun openFile(relativePath: String) {
+    /**
+     * Pre-flight gate for Run / Debug: if clangd's static analysis
+     * is currently reporting any error-severity diagnostics, refuse
+     * to start, switch to the Problems panel, and emit a terminal
+     * line explaining why. Warnings are NOT a blocker — only errors.
+     *
+     * Returns true if the action was aborted (caller should `return`),
+     * false if it's safe to proceed.
+     */
+    private fun abortIfStaticErrors(action: String): Boolean {
+        val errs = _state.value.allProblems.filter { it.isError }
+        if (errs.isEmpty()) return false
+        appendError("$action aborted: ${errs.size} error${if (errs.size == 1) "" else "s"} reported by static analyzer.")
+        appendError("Fix them and try again.")
+        _state.update {
+            it.copy(
+                bottomPanelVisible = true,
+                bottomPanelTab = BottomPanelTab.Problems,
+            )
+        }
+        return true
+    }
+
+    /**
+     * Fetch scopes for the top frame of the current stop, then fetch
+     * the variables of the first ("Locals") scope eagerly so the
+     * Variables tab has something to show without needing a tap.
+     * Other scopes (Globals, Registers) are fetched on demand when
+     * the user expands them.
+     */
+    private fun refreshVariablesForTopFrame(stopped: DebuggerState.Stopped) {
+        val topFrameId = stopped.callStack.firstOrNull()?.id ?: return
+        viewModelScope.launch {
+            core.debuggerService.fetchScopes(topFrameId).onSuccess { scopes ->
+                _state.update {
+                    it.copy(
+                        debugScopes = scopes,
+                        debugVariables = emptyMap(),
+                        expandedVariableRefs = emptySet(),
+                    )
+                }
+                // Eagerly load + auto-expand the first non-expensive
+                // scope (typically "Locals"). Expensive scopes
+                // (Registers, Globals) wait for a manual tap.
+                val firstCheap = scopes.firstOrNull { !it.expensive && it.variablesReference > 0 }
+                if (firstCheap != null) {
+                    core.debuggerService.fetchVariables(firstCheap.variablesReference)
+                        .onSuccess { vars ->
+                            _state.update {
+                                it.copy(
+                                    debugVariables = it.debugVariables + (firstCheap.variablesReference to vars),
+                                    expandedVariableRefs = it.expandedVariableRefs + firstCheap.variablesReference,
+                                )
+                            }
+                        }
+                }
+            }
+        }
+    }
+
+    /**
+     * Compute inline variable values for the file the debugger just
+     * stopped in, and publish them under [EditorState.inlineDebugValues].
+     *
+     * The value of this feature is that the user sees, without ever
+     * opening a side panel, the current value of each local/argument
+     * exactly where it's used in the source — VSCode-style. Doing it
+     * right (no false matches on comments/strings/keywords) requires
+     * cooperation between clangd (identifier locations via semantic
+     * tokens) and lldb (current values via DAP). This method glues
+     * the two together:
+     *
+     *   1. fetch every cheap scope for the top frame (Locals, Args, …)
+     *      and merge their variables into a single name → value map;
+     *   2. fetch semantic tokens for a window around the stopped line
+     *      so we avoid paying for a whole-file scan on tight step loops;
+     *   3. for each token of kind `variable`/`parameter`, slice the
+     *      source to get the identifier text, and if it matches a
+     *      variable name in the scope, bucket it under its source line.
+     *
+     * Expensive scopes (Globals, Registers) are skipped — they'd bloat
+     * the map without matching local-variable naming conventions anyway.
+     * If any step can't complete (clangd not ready, file not resolvable,
+     * no tokens returned), we quietly publish nothing; the user simply
+     * sees no inline annotations, which is better than guessing.
+     */
+    private fun refreshInlineDebugValues(stopped: DebuggerState.Stopped) {
+        val absPath = stopped.sourceFile ?: return
+        val centerLine = stopped.sourceLine ?: return
+        val topFrameId = stopped.callStack.firstOrNull()?.id ?: return
+
+        viewModelScope.launch {
+            val scopes = core.debuggerService.fetchScopes(topFrameId).getOrNull() ?: return@launch
+            // lldb-dap ships Globals/Registers with expensive=false just
+            // like Locals, so we can't rely on the protocol flag alone.
+            val localsScopes = scopes.filter {
+                val n = it.name.lowercase()
+                (n == "locals" || n == "arguments" || n == "local") &&
+                    it.variablesReference != 0
+            }
+            // Fetch each cheap scope's variables in parallel — two
+            // serial DAP round-trips per step adds up across a stepping
+            // session.
+            val fetched = coroutineScope {
+                localsScopes.map { scope ->
+                    async { core.debuggerService.fetchVariables(scope.variablesReference).getOrNull() }
+                }.awaitAll()
+            }
+            val varsByName = linkedMapOf<String, String>()
+            for (vars in fetched) {
+                if (vars == null) continue
+                for (v in vars) varsByName[v.name] = v.value
+            }
+            if (varsByName.isEmpty()) return@launch
+
+            val content = readSourceContent(absPath) ?: return@launch
+            val sourceLines = content.split('\n')
+            val totalLines = sourceLines.size
+            if (totalLines == 0) return@launch
+
+            val centerZero = (centerLine - 1).coerceIn(0, totalLines - 1)
+            val windowStart = (centerZero - 60).coerceAtLeast(0)
+            val windowEnd = (centerZero + 60).coerceAtMost(totalLines - 1)
+
+            val tokens = core.lspService.semanticTokensRange(
+                java.io.File(absPath), windowStart, windowEnd,
+            )
+            if (tokens.isEmpty()) return@launch
+
+            val byLine = linkedMapOf<Int, LinkedHashMap<String, String>>()
+            for (t in tokens) {
+                if (t.type != SemanticTokenTypes.Variable &&
+                    t.type != SemanticTokenTypes.Parameter) continue
+                val src = sourceLines.getOrNull(t.line) ?: continue
+                val end = t.startChar + t.length
+                if (t.startChar < 0 || end > src.length) continue
+                val name = src.substring(t.startChar, end)
+                val value = varsByName[name] ?: continue
+                val bucket = byLine.getOrPut(t.line + 1) { linkedMapOf() }
+                bucket[name] = value
+            }
+            Log.i(TAG, "inline: matched ${byLine.size} lines -> ${byLine.keys}")
+            val result: Map<Int, List<InlineDebugValue>> = byLine.mapValues { (_, m) ->
+                m.map { (n, v) -> InlineDebugValue(n, v) }
+            }
+
+            _state.update { it.copy(inlineDebugValues = mapOf(absPath to result)) }
+        }
+    }
+
+    /**
+     * Return the current content of [absPath] with the editor's live
+     * unsaved buffer preferred over the on-disk copy. Returns null if
+     * the path is unreadable (stopped inside libc, vdso, etc.).
+     */
+    private fun readSourceContent(absPath: String): String? {
+        val open = _state.value.openTabs.firstOrNull { tab ->
+            activeFileAbsPath(tab.relativePath) == absPath
+        }
+        if (open != null) return open.content
+        return runCatching { java.io.File(absPath).readText() }.getOrNull()
+    }
+
+    /**
+     * When the debugger stops inside a file that isn't the active tab,
+     * open it (or switch to its existing tab) so the editor can paint
+     * the current-line highlight. Best-effort — if the stopped file is
+     * outside the project root (system header, loader, libc), we do
+     * nothing and the highlight won't appear.
+     */
+    private fun autoOpenStoppedFile(absPath: String) {
+        val s = _state.value
+        // Already looking at the stopped file? Nothing to do.
+        if (s.openFile?.let { activeFileAbsPath(it.relativePath) } == absPath) return
+
+        // Try to compute a project-relative path. File system resolution
+        // must go through canonicalFile to cope with symlinks (our
+        // termux tree is full of them) and trailing-slash variants.
+        val root = runCatching { s.project.root.canonicalFile }.getOrNull() ?: return
+        val target = runCatching { java.io.File(absPath).canonicalFile }.getOrNull() ?: return
+        val rootPath = root.absolutePath.trimEnd('/')
+        val targetPath = target.absolutePath
+        if (!targetPath.startsWith("$rootPath/") && targetPath != rootPath) {
+            // Stopped outside the project (e.g. inside libc++, libc,
+            // the loader). Nothing to open.
+            return
+        }
+        val relativePath = targetPath.removePrefix("$rootPath/")
+        if (relativePath.isBlank()) return
+
+        // Go through the same tab/LSP plumbing as a manual OpenFile,
+        // but with stopDebugOnSwitch=false — we're switching BECAUSE
+        // the debugger stopped, so killing the session would be absurd.
+        openFile(relativePath, stopDebugOnSwitch = false)
+    }
+
+    private fun activeFileAbsPath(relativePath: String): String? =
+        runCatching { core.projectService.resolve(relativePath).absolutePath }.getOrNull()
+
+    private fun openFile(relativePath: String, stopDebugOnSwitch: Boolean = true) {
         // Close the drawer and flip the loading flag synchronously —
         // BEFORE touching the filesystem. The previous version waited for
         // the disk read to complete before closing the drawer, which on
@@ -398,8 +683,10 @@ class EditorViewModel(
             // Tear down any live debug session before switching — the
             // debuggee was compiled from the old file, so stepping into
             // it while the editor shows a different file is confusing
-            // at best and misleading at worst.
-            if (_state.value.debuggerState.isActive) {
+            // at best and misleading at worst. Skipped when the
+            // debugger itself is driving this navigation (auto-open
+            // on stop in a cross-file frame).
+            if (stopDebugOnSwitch && _state.value.debuggerState.isActive) {
                 runCatching { core.debuggerService.stop() }
             }
 
@@ -617,6 +904,15 @@ class EditorViewModel(
      */
     private suspend fun restoreOrSeedTabs(tree: dev.cppide.core.project.ProjectNode.Directory?) {
         tree ?: return
+        // If the route already asked for a specific file via
+        // `initialOpenFile`, that OpenFile intent may have raced ahead
+        // of this coroutine and populated openTabs already. Clobbering
+        // those tabs here would make the editor land on the persisted
+        // last-active file instead of the one the user just clicked
+        // from the Recent Files list — a confusing bug where tapping
+        // 5.cpp would open 2.cpp. Bail out and let the route's choice
+        // win.
+        if (_state.value.openTabs.isNotEmpty()) return
         val saved = ProjectUiState.load(core.context, _state.value.project.root)
         val paths = saved.openPaths.filter { pathExistsInTree(tree, it) }
         val toOpen = if (paths.isNotEmpty()) paths else listOfNotNull(
@@ -636,9 +932,17 @@ class EditorViewModel(
         val activeIdx = loaded.indexOfFirst { it.relativePath == activePath }
             .takeIf { it >= 0 } ?: 0
 
+        var applied = false
         _state.update { s ->
-            s.copy(openTabs = loaded, activeTabIndex = activeIdx)
+            // Second check inside the update closure to cover the case
+            // where OpenFile landed between the earlier guard and here.
+            if (s.openTabs.isNotEmpty()) s
+            else {
+                applied = true
+                s.copy(openTabs = loaded, activeTabIndex = activeIdx)
+            }
         }
+        if (!applied) return
         persistUiState()
 
         // Tell clangd about each restored tab. didOpen is idempotent from
@@ -753,6 +1057,12 @@ class EditorViewModel(
             // 0. Auto-save
             if (!save()) return@launch
 
+            // 0b. Pre-run static analysis check. If clangd is reporting
+            // any error-severity diagnostics for the open file, abort
+            // and surface the Problems panel instead of compiling code
+            // we already know is broken. Warnings don't block.
+            if (abortIfStaticErrors("Run")) return@launch
+
             // 1. Always run install() — it's idempotent. Critical for symlink
             //    repair: nativeLibraryDir gets a fresh random path on every
             //    APK reinstall, so any old symlinks in filesDir/termux/bin/
@@ -768,9 +1078,10 @@ class EditorViewModel(
                 ) }
                 appendInfo("Installing toolchain (first run, ~30s)…")
             }
-            val install = core.toolchain.install { progress ->
-                if (needsExtract) appendInfo("  $progress")
-            }
+            // Progress updates land on ToolchainState via install() already,
+            // which the UI surfaces as a spinner status. Don't spam the
+            // terminal with per-500-file "extracted N files (M MB)" lines.
+            val install = core.toolchain.install { /* silent */ }
             if (install.isFailure) {
                 appendError("Toolchain install failed: ${install.exceptionOrNull()?.message}")
                 _state.update { it.copy(runState = RunState.Idle) }
@@ -783,6 +1094,12 @@ class EditorViewModel(
                 bottomPanelVisible = true,
                 bottomPanelTab = BottomPanelTab.Terminal,
                 problems = emptyList(),
+                // Start each Run with a fresh terminal. Otherwise the
+                // previous session's output (including a partial prompt
+                // with no trailing '\n') leaks into the new session and
+                // the input field appears before any new output has
+                // been emitted.
+                terminalLines = emptyList(),
             ) }
             appendInfo("Building ${openFile.name}…")
 
@@ -828,7 +1145,9 @@ class EditorViewModel(
     private suspend fun runProgram(library: File) {
         _state.update { it.copy(runState = RunState.Running, bottomPanelTab = BottomPanelTab.Terminal) }
 
-        core.runService.run(RunConfig(library = library)).collect { event ->
+        core.runService.run(
+            RunConfig(library = library, stdin = terminalStdin),
+        ).collect { event ->
             when (event) {
                 RunEvent.Started -> appendInfo("Running…")
                 is RunEvent.Stdout -> appendStdout(event.text)
@@ -850,6 +1169,25 @@ class EditorViewModel(
         runJob = null
         appendInfo("Stopped")
         _state.update { it.copy(runState = RunState.Idle) }
+    }
+
+    /**
+     * Forward a line of user input to the running inferior's stdin. Appends
+     * `\n` unconditionally — line-based programs (cin >> x, getline) need it,
+     * and the few byte-oriented programs that don't can still parse it out.
+     * No-op when nothing is running; we also echo the submitted text into the
+     * terminal panel so the user sees what they sent.
+     */
+    private fun sendTerminalInput(text: String) {
+        // Accept during Run (runState=Running) OR during an active debug
+        // session — debug is tracked on a separate state machine.
+        val debugActive = core.debuggerService.state.value.isActive
+        if (_state.value.runState != RunState.Running && !debugActive) return
+        val line = text + "\n"
+        appendStdout(line)
+        if (!terminalStdin.tryEmit(line)) {
+            appendError("stdin buffer full — input dropped")
+        }
     }
 
     // ---- debug pipeline ----
@@ -876,8 +1214,26 @@ class EditorViewModel(
             // 0. Save in-flight edits.
             if (!save()) return@launch
 
+            // 0b. Same pre-flight static-analysis gate as Run. If clangd
+            // is reporting compile errors, debugging would just fail at
+            // build time anyway — better to show the user the problem
+            // up front instead of after an asset extraction round-trip.
+            if (abortIfStaticErrors("Debug")) return@launch
+
+            // Open the terminal panel immediately so the FAB hides
+            // through the toolchain install + build phase instead of
+            // lingering visibly while work happens off-screen. Also
+            // reset the terminal buffer so the previous session's
+            // output isn't mistaken for output from this debug run.
+            _state.update {
+                it.copy(
+                    bottomPanelVisible = true,
+                    bottomPanelTab = BottomPanelTab.Terminal,
+                    terminalLines = emptyList(),
+                )
+            }
+
             // 1. Toolchain install (idempotent).
-            appendInfo("Preparing debugger…")
             val install = core.toolchain.install()
             if (install.isFailure) {
                 appendError("Toolchain install failed: ${install.exceptionOrNull()?.message}")
@@ -885,14 +1241,15 @@ class EditorViewModel(
             }
 
             // 2. Debug build. Separate output file from Run so both can
-            // coexist on disk without cross-contamination.
+            // coexist on disk without cross-contamination. Show the
+            // Terminal tab by default while debugging so the user
+            // sees inferior stdout immediately; they can switch to
+            // Variables manually when they want to inspect locals.
             _state.update { it.copy(
                 bottomPanelVisible = true,
-                bottomPanelTab = BottomPanelTab.Debug,
+                bottomPanelTab = BottomPanelTab.Terminal,
                 problems = emptyList(),
             ) }
-            appendInfo("Debug-building ${openFile.name}…")
-
             val source = core.projectService.resolve(openFile.relativePath)
             val buildDir = File(core.context.filesDir, "build-debug/${state.value.project.name}")
             buildDir.mkdirs()
@@ -913,7 +1270,6 @@ class EditorViewModel(
             val buildResult = core.buildService.build(config)
             when (buildResult) {
                 is BuildResult.Success -> {
-                    appendInfo("Debug build OK in ${buildResult.durationMs} ms")
                     _state.update { it.copy(problems = buildResult.diagnostics) }
                 }
                 is BuildResult.Failure -> {
@@ -921,7 +1277,7 @@ class EditorViewModel(
                     _state.update { it.copy(
                         problems = buildResult.diagnostics,
                         bottomPanelTab = if (buildResult.diagnostics.isNotEmpty())
-                            BottomPanelTab.Problems else BottomPanelTab.Debug,
+                            BottomPanelTab.Problems else BottomPanelTab.Variables,
                     ) }
                     return@launch
                 }
@@ -941,9 +1297,12 @@ class EditorViewModel(
                 appendError("Trampoline binary missing at ${trampoline.absolutePath}")
                 return@launch
             }
-            appendInfo("Starting lldb-server with ${trampoline.name}…")
-            core.debuggerService.start(trampoline, outputSo)
-                .onFailure { t -> appendError("debugger start failed: ${t.message}") }
+            core.debuggerService.start(
+                trampolineBinary = trampoline,
+                userLibrary = outputSo,
+                projectRoot = state.value.project.root,
+                stdin = terminalStdin,
+            ).onFailure { t -> appendError("debugger start failed: ${t.message}") }
         }
     }
 
@@ -984,17 +1343,6 @@ class EditorViewModel(
         return items
     }
 
-    /**
-     * Fetch clangd hover info for the open file at [line]/[column] (both
-     * 0-indexed). Invoked by [EditorPane] on long-press. Returns null
-     * when clangd has nothing — caller suppresses the tooltip then.
-     */
-    suspend fun requestHover(line: Int, column: Int): String? {
-        val openFile = _state.value.openFile ?: return null
-        val file = core.projectService.resolve(openFile.relativePath)
-        return core.lspService.hover(file, line, column)
-    }
-
     // ---- diagnostic helpers ----
 
     private fun jumpTo(diagnostic: Diagnostic) {
@@ -1007,11 +1355,57 @@ class EditorViewModel(
 
     // ---- terminal append helpers ----
 
-    private fun appendStdout(text: String) = _state.update {
-        it.copy(terminalLines = it.terminalLines + TerminalLine.Stdout(text))
-    }
-    private fun appendStderr(text: String) = _state.update {
-        it.copy(terminalLines = it.terminalLines + TerminalLine.Stderr(text))
+    private fun appendStdout(text: String) = appendTerminal { TerminalLine.Stdout(it) }(text)
+
+    private fun appendStderr(text: String) = appendTerminal { TerminalLine.Stderr(it) }(text)
+
+    /**
+     * Append [text] to [EditorState.terminalLines] under the line type
+     * produced by [wrap], coalescing with the previous entry when they
+     * form a continuation of the same logical output line.
+     *
+     * Why coalesce: `runtime_shim.cpp` sets the inferior's stdout to
+     * `_IONBF` so `cout << "prompt: "` (no '\n') appears immediately
+     * before the next `cin >>`. The side-effect is that every `<<`
+     * operator becomes its own pipe write: `cout << a << b` emits two
+     * chunks ("ghh", "hhj") which get appended as two `TerminalLine`
+     * entries, then render on two visually separate lines — not the
+     * single concatenated line the user wrote. Merging back-to-back
+     * chunks of the same kind when the previous one didn't terminate
+     * with '\n' restores the expected display without giving up the
+     * prompt-immediacy of unbuffered stdout.
+     *
+     * Cross-kind chunks (stdout → stderr or stdout → info) never merge
+     * because they need to keep their distinct colors.
+     */
+    private fun appendTerminal(wrap: (String) -> TerminalLine): (String) -> Unit = { text ->
+        _state.update { state ->
+            val lines = state.terminalLines
+            val prev = lines.lastOrNull()
+            val incoming = wrap(text)
+            val merged = if (
+                prev != null &&
+                prev.javaClass == incoming.javaClass &&
+                !prev.text.endsWith('\n')
+            ) {
+                // Same line type, previous didn't end in '\n' — extend
+                // it rather than starting a new entry.
+                lines.subList(0, lines.size - 1) + wrap(prev.text + text)
+            } else {
+                lines + incoming
+            }
+            // Cap total entries to bound memory for long-running programs
+            // (e.g. a `while(true) cout`). Drop from the head so the most
+            // recent output stays visible; the build-up cost is still
+            // O(n) per chunk from the immutable-list copy, but a cap keeps
+            // n bounded so the worst case is predictable.
+            val bounded = if (merged.size > MAX_TERMINAL_LINES) {
+                merged.subList(merged.size - MAX_TERMINAL_LINES, merged.size)
+            } else {
+                merged
+            }
+            state.copy(terminalLines = bounded)
+        }
     }
     private fun appendInfo(text: String) = _state.update {
         it.copy(terminalLines = it.terminalLines + TerminalLine.Info(text))
@@ -1051,6 +1445,11 @@ class EditorViewModel(
 
     companion object {
         private const val TAG = "cppide-editor"
+        /** Upper bound on retained terminal lines — a runaway program
+         *  still gets its recent output rendered, but we stop growing
+         *  the list (and therefore the per-chunk copy cost) past this
+         *  point. */
+        private const val MAX_TERMINAL_LINES = 5000
         /** How long after the last keystroke to auto-save. */
         private const val AUTO_SAVE_DELAY_MS = 1_000L
         /** How long after the last keystroke to push didChange to clangd. */
