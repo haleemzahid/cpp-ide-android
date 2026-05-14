@@ -2,20 +2,13 @@
 <!--
   Network security config.
 
-  Cleartext is permitted globally because: (a) backend subdomains under
-  *.traefik.me still use plain HTTP while Dokploy TLS is sorted, and
-  (b) some mobile carriers (e.g. Ufone PK) transparently redirect blocked
-  requests to a carrier-hosted HTTP filter page (`ufonepk.filter.ncnd.mobi`)
-  which Android's strict default rejects with a "Cleartext HTTP traffic
-  not permitted" error — surfacing as a hard crash instead of a network
-  error we can catch.
-
-  When the backend moves to a proper HTTPS domain and the carrier-filter
-  redirect no longer shows, flip base-config's cleartextTrafficPermitted
-  back to "false" and the app is locked down again.
+  All app traffic goes to the exercises API over HTTPS (Dokploy serves
+  a valid Let's Encrypt cert via *.nip.io), so cleartext is disabled
+  globally — this satisfies Play Store's network-security review and
+  rejects any accidental http:// requests at the platform layer.
 -->
 <network-security-config>
-    <base-config cleartextTrafficPermitted="true">
+    <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
             <certificates src="system" />
         </trust-anchors>
